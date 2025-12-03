@@ -13,7 +13,7 @@ An order book is a fundamental data structure in financial trading systems that 
 - **Asks**: Sell orders sorted by price (lowest first)
 - **Price levels**: Each price point with its associated quantity
 
-## 🏗️ Project Structure
+## Project Structure
 
 ```
 src/
