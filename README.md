@@ -23,7 +23,7 @@ src/
 └── benchmarks.rs    # Comprehensive benchmarking framework
 ```
 
-## 🔧 Implementation Requirements
+## Implementation Requirements
 
 Implement the `OrderBook` trait with the following methods:
 
@@ -75,7 +75,7 @@ Implement the `OrderBook` trait with the following methods:
    cargo run --release
    ```
 
-## 📊 Benchmark Metrics
+## Benchmark Metrics
 
 The benchmark suite measures:
 - **Update operations** (avg, P50, P95, P99)
@@ -102,7 +102,7 @@ Example output:
   ...
 ```
 
-## 💡 Optimization Tips
+## Optimization Tips
 
 1. **Data Structures**: Carefully chose your data structure. It will be the most critical choice
 
