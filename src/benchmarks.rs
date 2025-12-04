@@ -1,10 +1,6 @@
 use crate::interfaces::{OrderBook, Side, Update};
 use std::time::Instant;
 
-// ============================================================================
-// BENCHMARKING & TESTING FRAMEWORK
-// ============================================================================
-
 #[derive(Debug, Clone)]
 pub struct BenchmarkResult {
     pub name: String,
@@ -22,31 +18,25 @@ pub struct BenchmarkResult {
 pub struct OrderBookBenchmark;
 
 impl OrderBookBenchmark {
-    /// Run comprehensive benchmark suite
     pub fn run<T: OrderBook>(name: &str, iterations: usize) -> BenchmarkResult {
         let mut ob = T::new();
 
-        // Warm up
+        println!("🔬 Calibrating benchmark overhead...");
+        let overhead = Self::measure_timing_overhead();
+        println!("   Instant::now() overhead: ~{} ns\n", overhead);
+
         Self::warmup(&mut ob);
 
-        // Benchmark updates
         let update_timings = Self::benchmark_updates(&mut ob, iterations);
-
-        // Benchmark spread calculations
         let spread_timings = Self::benchmark_spread(&ob, iterations / 10);
-
-        // Benchmark best bid/ask
         let best_bid_timings = Self::benchmark_best_bid(&ob, iterations / 10);
         let best_ask_timings = Self::benchmark_best_ask(&ob, iterations / 10);
-
-        // Benchmark random reads
         let read_timings = Self::benchmark_random_reads(&ob, iterations / 10);
-
-        let avg_update = Self::average(&update_timings);
-        let avg_spread = Self::average(&spread_timings);
-        let avg_best_bid = Self::average(&best_bid_timings);
-        let avg_best_ask = Self::average(&best_ask_timings);
-        let avg_read = Self::average(&read_timings);
+        let avg_update = (Self::average(&update_timings) - overhead as f64).max(0.0);
+        let avg_spread = (Self::average(&spread_timings) - overhead as f64).max(0.0);
+        let avg_best_bid = (Self::average(&best_bid_timings) - overhead as f64).max(0.0);
+        let avg_best_ask = (Self::average(&best_ask_timings) - overhead as f64).max(0.0);
+        let avg_read = (Self::average(&read_timings) - overhead as f64).max(0.0);
 
         let mut sorted_updates = update_timings.clone();
         sorted_updates.sort();
@@ -58,15 +48,29 @@ impl OrderBookBenchmark {
             avg_best_bid_ns: avg_best_bid,
             avg_best_ask_ns: avg_best_ask,
             avg_random_read_ns: avg_read,
-            p50_update_ns: sorted_updates[sorted_updates.len() / 2],
-            p95_update_ns: sorted_updates[sorted_updates.len() * 95 / 100],
-            p99_update_ns: sorted_updates[sorted_updates.len() * 99 / 100],
+            p50_update_ns: sorted_updates[sorted_updates.len() / 2].saturating_sub(overhead),
+            p95_update_ns: sorted_updates[sorted_updates.len() * 95 / 100].saturating_sub(overhead),
+            p99_update_ns: sorted_updates[sorted_updates.len() * 99 / 100].saturating_sub(overhead),
             total_operations: iterations,
         }
     }
+    
+    fn measure_timing_overhead() -> u64 {
+        let iterations = 10000;
+        let mut timings = Vec::with_capacity(iterations);
+        
+        for _ in 0..iterations {
+            let start = Instant::now();
+            std::hint::black_box(());
+            let elapsed = start.elapsed().as_nanos() as u64;
+            timings.push(elapsed);
+        }
+        
+        timings.sort();
+        timings[iterations / 2]
+    }
 
     fn warmup<T: OrderBook>(ob: &mut T) {
-        // Add some initial levels
         for i in 0..100 {
             ob.apply_update(Update::Set {
                 price: 100000 + i * 10,
@@ -85,17 +89,22 @@ impl OrderBookBenchmark {
         let mut timings = Vec::with_capacity(iterations);
         let base_price = 100000;
 
-        for i in 0..iterations {
-            let update = Update::Set {
+        let updates: Vec<Update> = (0..iterations)
+            .map(|i| Update::Set {
                 price: base_price + (i as i64 % 1000) * 10,
                 quantity: 50 + (i as u64 % 200),
                 side: if i % 2 == 0 { Side::Bid } else { Side::Ask },
-            };
+            })
+            .collect();
 
+        for _ in 0..100 {
+            ob.apply_update(updates[0].clone());
+        }
+
+        for update in updates.iter() {
             let start = Instant::now();
-            ob.apply_update(update);
+            std::hint::black_box(ob.apply_update(update.clone()));
             let elapsed = start.elapsed().as_nanos() as u64;
-
             timings.push(elapsed);
         }
 
@@ -105,9 +114,13 @@ impl OrderBookBenchmark {
     fn benchmark_spread<T: OrderBook>(ob: &T, iterations: usize) -> Vec<u64> {
         let mut timings = Vec::with_capacity(iterations);
 
+        for _ in 0..100 {
+            std::hint::black_box(ob.get_spread());
+        }
+
         for _ in 0..iterations {
             let start = Instant::now();
-            let _ = ob.get_spread();
+            std::hint::black_box(ob.get_spread());
             let elapsed = start.elapsed().as_nanos() as u64;
             timings.push(elapsed);
         }
@@ -118,9 +131,13 @@ impl OrderBookBenchmark {
     fn benchmark_best_bid<T: OrderBook>(ob: &T, iterations: usize) -> Vec<u64> {
         let mut timings = Vec::with_capacity(iterations);
 
+        for _ in 0..100 {
+            std::hint::black_box(ob.get_best_bid());
+        }
+
         for _ in 0..iterations {
             let start = Instant::now();
-            let _ = ob.get_best_bid();
+            std::hint::black_box(ob.get_best_bid());
             let elapsed = start.elapsed().as_nanos() as u64;
             timings.push(elapsed);
         }
@@ -131,9 +148,13 @@ impl OrderBookBenchmark {
     fn benchmark_best_ask<T: OrderBook>(ob: &T, iterations: usize) -> Vec<u64> {
         let mut timings = Vec::with_capacity(iterations);
 
+        for _ in 0..100 {
+            std::hint::black_box(ob.get_best_ask());
+        }
+
         for _ in 0..iterations {
             let start = Instant::now();
-            let _ = ob.get_best_ask();
+            std::hint::black_box(ob.get_best_ask());
             let elapsed = start.elapsed().as_nanos() as u64;
             timings.push(elapsed);
         }
@@ -145,12 +166,16 @@ impl OrderBookBenchmark {
         let mut timings = Vec::with_capacity(iterations);
         let base_price = 100000;
 
+        for _ in 0..100 {
+            std::hint::black_box(ob.get_quantity_at(base_price, Side::Bid));
+        }
+
         for i in 0..iterations {
             let price = base_price + (i as i64 % 500) * 10;
             let side = if i % 2 == 0 { Side::Bid } else { Side::Ask };
 
             let start = Instant::now();
-            let _ = ob.get_quantity_at(price, side);
+            std::hint::black_box(ob.get_quantity_at(price, side));
             let elapsed = start.elapsed().as_nanos() as u64;
             timings.push(elapsed);
         }
@@ -162,11 +187,8 @@ impl OrderBookBenchmark {
         timings.iter().sum::<u64>() as f64 / timings.len() as f64
     }
 
-    /// Print formatted results
     pub fn print_results(result: &BenchmarkResult) {
-        println!("\n{}", "=".repeat(60));
-        println!("  BENCHMARK RESULTS: {}", result.name);
-        println!("{}", "=".repeat(60));
+        println!("\n{}", "=".repeat(70));
         println!("  Total Operations: {}", result.total_operations);
         println!("  ---");
         println!("  Update Operations:");
@@ -186,6 +208,6 @@ impl OrderBookBenchmark {
         println!("  ---");
         println!("  Random Reads:");
         println!("    Average: {:.2} ns", result.avg_random_read_ns);
-        println!("{}\n", "=".repeat(60));
+        println!("{}", "=".repeat(70));
     }
 }
