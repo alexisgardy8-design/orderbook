@@ -3,12 +3,8 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 #[cfg(feature = "websocket")]
 use futures_util::{StreamExt, SinkExt};
 use serde::{Deserialize, Serialize};
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
-use base64::{Engine as _, engine::general_purpose};
-use std::time::{SystemTime, UNIX_EPOCH};
-use jsonwebtoken::{encode, EncodingKey, Header, Algorithm};
-use rand::Rng;
+use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
 
 #[derive(Debug, Deserialize)]
 pub struct CoinbaseL2Update {
@@ -56,17 +52,33 @@ impl CoinbaseFeed {
     }
     
     #[cfg(feature = "websocket")]
-    pub async fn connect(&self) -> Result<(), Box<dyn std::error::Error>> {
-        dotenv::dotenv().ok();
+    pub async fn connect_with_arbitrage(&self) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::interfaces::OrderBook;
+        use crate::orderbook::OrderBookImpl;
+        use crate::triangular_arbitrage::TriangularArbitrageDetector;
+        use std::time::Instant;
         
-        let api_key = std::env::var("API_KEY").ok();
-        let secret_key = std::env::var("SECRET_KEY").ok();
-        let passphrase = std::env::var("PASSPHRASE").ok();
+        // Initialize orderbooks for the three pairs
+        let mut orderbooks = HashMap::new();
+        orderbooks.insert("ATOM-USD".to_string(), Arc::new(Mutex::new(OrderBookImpl::new())));
+        orderbooks.insert("ATOM-BTC".to_string(), Arc::new(Mutex::new(OrderBookImpl::new())));
+        orderbooks.insert("BTC-USD".to_string(), Arc::new(Mutex::new(OrderBookImpl::new())));
         
+        // Create arbitrage detector
+        let detector = Arc::new(Mutex::new(
+            TriangularArbitrageDetector::new(0.2) // 0.2% minimum profit
+        ));
+        
+        let opportunities_found = Arc::new(Mutex::new(0u64));
+        let updates_processed = Arc::new(Mutex::new(0u64));
+        let total_processing_time = Arc::new(Mutex::new(0u128));
+        
+        // Connect to WebSocket
         let (ws_stream, _) = connect_async(&self.url).await?;
         let (mut write, mut read) = ws_stream.split();
         
-        let mut subscribe = SubscribeMessage {
+        // Subscribe to level2_batch (public, no auth)
+        let subscribe = SubscribeMessage {
             msg_type: "subscribe".to_string(),
             product_ids: self.products.clone(),
             channels: vec!["level2_batch".to_string(), "heartbeat".to_string()],
@@ -76,64 +88,65 @@ impl CoinbaseFeed {
             timestamp: None,
         };
         
-        // Coinbase Exchange WebSocket Authentication (HMAC-SHA256)
-        // For authenticated level2 channel (optional - level2_batch works without auth)
-        if let (Some(key), Some(secret), Some(pass)) = (&api_key, &secret_key, &passphrase) {
-            let timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)?
-                .as_secs()
-                .to_string();
-            
-            // Create signature: timestamp + 'GET' + '/users/self/verify'
-            let signature_path = "/users/self/verify";
-            let message = format!("{}{}{}", timestamp, "GET", signature_path);
-            
-            // Decode base64 secret
-            let secret_decoded = general_purpose::STANDARD.decode(secret)?;
-            
-            // Create HMAC-SHA256 signature
-            let mut mac = Hmac::<Sha256>::new_from_slice(&secret_decoded)?;
-            mac.update(message.as_bytes());
-            let signature = general_purpose::STANDARD.encode(mac.finalize().into_bytes());
-            
-            subscribe.signature = Some(signature);
-            subscribe.key = Some(key.clone());
-            subscribe.passphrase = Some(pass.clone());
-            subscribe.timestamp = Some(timestamp);
-            
-            println!("🔐 Authenticated with HMAC-SHA256 (Exchange API)");
-            subscribe.channels = vec!["level2".to_string(), "heartbeat".to_string()];
-        } else {
-            println!("✅ Using public level2_batch channel (no auth needed)");
-        }
-        
         let subscribe_msg = serde_json::to_string(&subscribe)?;
         write.send(Message::Text(subscribe_msg)).await?;
         
         println!("✅ Connected to Coinbase WebSocket");
-        println!("📡 Subscribing to: {:?} on channels: {:?}", self.products, subscribe.channels);
+        println!("📡 Subscribing to: {:?} on level2_batch", self.products);
+        println!("\n🚀 Live Arbitrage Detection Started!");
+        println!("   Fee: 0.1% | Min Profit: 0.2%\n");
         
+        let mut update_count = 0u64;
+        let start_time = Instant::now();
+        
+        // Process messages
         while let Some(msg) = read.next().await {
             match msg {
                 Ok(Message::Text(text)) => {
-                    // Debug: print raw message type
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
                         if let Some(msg_type) = value.get("type").and_then(|v| v.as_str()) {
                             match msg_type {
                                 "subscriptions" => {
                                     println!("✅ Subscription confirmed!");
                                 }
-                                "snapshot" | "l2update" | "ticker" => {
+                                "snapshot" | "l2update" => {
                                     if let Ok(update) = serde_json::from_str::<CoinbaseL2Update>(&text) {
-                                        self.process_update(update);
+                                        let process_start = Instant::now();
+                                        
+                                        self.process_arbitrage_update(
+                                            update,
+                                            &orderbooks,
+                                            &detector,
+                                            &opportunities_found,
+                                            &updates_processed,
+                                            &total_processing_time,
+                                        );
+                                        
+                                        let process_time = process_start.elapsed().as_nanos();
+                                        *total_processing_time.lock().unwrap() += process_time;
+                                        
+                                        update_count += 1;
+                                        if update_count % 100 == 0 {
+                                            let elapsed = start_time.elapsed().as_secs_f64();
+                                            let updates = *updates_processed.lock().unwrap();
+                                            let opps = *opportunities_found.lock().unwrap();
+                                            let avg_time = if updates > 0 {
+                                                *total_processing_time.lock().unwrap() / updates as u128
+                                            } else {
+                                                0
+                                            };
+                                            
+                                            println!("\n📊 Performance Stats:");
+                                            println!("   Updates: {} | Opps: {} | Rate: {:.0} updates/s", 
+                                                updates, opps, updates as f64 / elapsed);
+                                            println!("   Avg Processing: {} ns | Target: <1ns", avg_time);
+                                        }
                                     }
                                 }
                                 "error" => {
                                     println!("❌ Error from Coinbase: {}", text);
                                 }
-                                _ => {
-                                    println!("ℹ️  Message type: {}", msg_type);
-                                }
+                                _ => {}
                             }
                         }
                     }
@@ -152,49 +165,95 @@ impl CoinbaseFeed {
         Ok(())
     }
     
-    fn process_update(&self, update: CoinbaseL2Update) {
-        match update.msg_type.as_str() {
-            "snapshot" => {
-                println!("\n📸 L2 Snapshot for {} ({} levels)", 
-                    update.product_id, update.changes.len());
+    fn process_arbitrage_update(
+        &self,
+        update: CoinbaseL2Update,
+        orderbooks: &HashMap<String, Arc<Mutex<crate::orderbook::OrderBookImpl>>>,
+        detector: &Arc<Mutex<crate::triangular_arbitrage::TriangularArbitrageDetector>>,
+        opportunities_found: &Arc<Mutex<u64>>,
+        updates_processed: &Arc<Mutex<u64>>,
+        _total_time: &Arc<Mutex<u128>>,
+    ) {
+        use crate::interfaces::{Update, Side, OrderBook};
+        
+        if let Some(ob) = orderbooks.get(&update.product_id) {
+            let mut ob_lock = ob.lock().unwrap();
+            
+            // Apply updates to orderbook
+            for change in &update.changes {
+                if change.len() >= 3 {
+                    let side = if change[0] == "buy" { Side::Bid } else { Side::Ask };
+                    let price = change[1].parse::<f64>().unwrap_or(0.0);
+                    let quantity = change[2].parse::<f64>().unwrap_or(0.0);
+                    
+                    // Convert price to integer with 4 decimal places precision
+                    let price_int = (price * 10000.0) as i64;
+                    
+                    if price_int >= 0 && price_int < 200_000 {
+                        let update = Update::Set {
+                            side,
+                            price: price_int,
+                            quantity: (quantity * 1_000_000.0) as u64, // Convert to micros
+                        };
+                        
+                        ob_lock.apply_update(update);
+                    }
+                }
+            }
+            
+            drop(ob_lock);
+            
+            let update_count = {
+                let mut count = updates_processed.lock().unwrap();
+                *count += 1;
+                *count
+            };
+            
+            // Check for arbitrage opportunities every 10 updates to reduce lock contention
+            if update_count % 10 == 0 {
+                let ob1 = orderbooks.get("ATOM-USD").unwrap().lock().unwrap();
+                let ob2 = orderbooks.get("ATOM-BTC").unwrap().lock().unwrap();
+                let ob3 = orderbooks.get("BTC-USD").unwrap().lock().unwrap();
                 
-                let mut bids = 0;
-                let mut asks = 0;
-                for change in &update.changes {
-                    if change.len() >= 3 {
-                        if change[0] == "buy" { bids += 1; } else { asks += 1; }
-                    }
+                // Debug: print prices every 100 updates
+                if update_count % 100 == 0 {
+                    println!("\n🔍 Current Orderbook Prices:");
+                    println!("   ATOM-USD: Bid={:?} Ask={:?}", 
+                        ob1.get_best_bid().map(|p| p as f64 / 10000.0),
+                        ob1.get_best_ask().map(|p| p as f64 / 10000.0));
+                    println!("   ATOM-BTC: Bid={:?} Ask={:?}",
+                        ob2.get_best_bid().map(|p| p as f64 / 10000.0),
+                        ob2.get_best_ask().map(|p| p as f64 / 10000.0));
+                    println!("   BTC-USD:  Bid={:?} Ask={:?}",
+                        ob3.get_best_bid().map(|p| p as f64 / 10000.0),
+                        ob3.get_best_ask().map(|p| p as f64 / 10000.0));
                 }
-                println!("   Bids: {} | Asks: {}", bids, asks);
                 
-                if !update.changes.is_empty() {
-                    let first = &update.changes[0];
-                    if first.len() >= 3 {
-                        println!("   Sample: {} @ {} (size: {})", first[0], first[1], first[2]);
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                
+                let mut det = detector.lock().unwrap();
+                let opportunities = det.detect_opportunities_with_refs(&*ob1, &*ob2, &*ob3, timestamp, 1000.0);
+                
+                drop(det);
+                drop(ob1);
+                drop(ob2);
+                drop(ob3);
+                
+                if !opportunities.is_empty() {
+                    let mut opps = opportunities_found.lock().unwrap();
+                    *opps += opportunities.len() as u64;
+                    
+                    for opp in opportunities {
+                        println!("\n🎯 ARBITRAGE OPPORTUNITY DETECTED!");
+                        println!("   Path: {:?}", opp.path);
+                        println!("   Profit: ${:.2} ({:.2}%)", opp.net_profit, opp.profit_percentage * 100.0);
+                        println!("   Input: ${:.2} | Output: ${:.2}", opp.input_amount, opp.expected_output);
                     }
                 }
             }
-            "l2update" => {
-                println!("🔄 L2 Update {} - {} changes", update.product_id, update.changes.len());
-                for change in &update.changes {
-                    if change.len() >= 3 {
-                        let side = if change[0] == "buy" { "🟢" } else { "🔴" };
-                        println!("   {} {} @ {} (size: {})", side, change[0], change[1], change[2]);
-                    }
-                }
-            }
-            "ticker" => {
-                if !update.best_bid.is_empty() && !update.best_ask.is_empty() {
-                    let spread = if let (Ok(bid), Ok(ask)) = (update.best_bid.parse::<f64>(), update.best_ask.parse::<f64>()) {
-                        ask - bid
-                    } else {
-                        0.0
-                    };
-                    println!("📊 {} - Bid: {} | Ask: {} | Spread: {:.4}", 
-                        update.product_id, update.best_bid, update.best_ask, spread);
-                }
-            }
-            _ => {}
         }
     }
 }

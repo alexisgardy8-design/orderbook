@@ -1,5 +1,4 @@
 use crate::backtest::BacktestResult;
-use crate::triangular_arbitrage::ArbitragePath;
 
 pub struct ReportGenerator;
 

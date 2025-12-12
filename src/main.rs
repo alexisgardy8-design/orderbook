@@ -100,7 +100,7 @@ fn run_live_mode() {
         
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            if let Err(e) = feed.connect().await {
+            if let Err(e) = feed.connect_with_arbitrage().await {
                 eprintln!("❌ Connection error: {}", e);
             }
         });

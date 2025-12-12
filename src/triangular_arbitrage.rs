@@ -1,4 +1,4 @@
-use crate::interfaces::{OrderBook, Price};
+use crate::interfaces::OrderBook;
 use crate::orderbook::OrderBookImpl;
 
 #[derive(Debug, Clone)]
@@ -59,6 +59,16 @@ impl TriangularArbitrageDetector {
         self.cached_price3_ask = self.pair3.get_best_ask().unwrap_or(0) as f64 / 10000.0;
         self.cached_price3_bid = self.pair3.get_best_bid().unwrap_or(0) as f64 / 10000.0;
     }
+    
+    #[inline(always)]
+    fn update_price_cache_with_refs(&mut self, ob1: &OrderBookImpl, ob2: &OrderBookImpl, ob3: &OrderBookImpl) {
+        self.cached_price1_ask = ob1.get_best_ask().unwrap_or(0) as f64 / 10000.0;
+        self.cached_price1_bid = ob1.get_best_bid().unwrap_or(0) as f64 / 10000.0;
+        self.cached_price2_ask = ob2.get_best_ask().unwrap_or(0) as f64 / 10000.0;
+        self.cached_price2_bid = ob2.get_best_bid().unwrap_or(0) as f64 / 10000.0;
+        self.cached_price3_ask = ob3.get_best_ask().unwrap_or(0) as f64 / 10000.0;
+        self.cached_price3_bid = ob3.get_best_bid().unwrap_or(0) as f64 / 10000.0;
+    }
 
     #[inline(always)]
     pub fn detect_opportunities(
@@ -67,6 +77,30 @@ impl TriangularArbitrageDetector {
         starting_amount: f64,
     ) -> Vec<TriangularOpportunity> {
         self.update_price_cache();
+        
+        let mut opportunities = Vec::with_capacity(2);
+
+        if let Some(opp) = self.check_forward_path_fast(timestamp, starting_amount) {
+            opportunities.push(opp);
+        }
+
+        if let Some(opp) = self.check_reverse_path_fast(timestamp, starting_amount) {
+            opportunities.push(opp);
+        }
+
+        opportunities
+    }
+
+    #[inline(always)]
+    pub fn detect_opportunities_with_refs(
+        &mut self,
+        ob1: &OrderBookImpl,
+        ob2: &OrderBookImpl,
+        ob3: &OrderBookImpl,
+        timestamp: u64,
+        starting_amount: f64,
+    ) -> Vec<TriangularOpportunity> {
+        self.update_price_cache_with_refs(ob1, ob2, ob3);
         
         let mut opportunities = Vec::with_capacity(2);
 

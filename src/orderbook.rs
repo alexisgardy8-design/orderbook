@@ -176,3 +176,14 @@ impl OrderBook for OrderBookImpl {
         }
     }
 }
+
+impl Clone for OrderBookImpl {
+    fn clone(&self) -> Self {
+        Self {
+            bids: self.bids.clone(),
+            asks: self.asks.clone(),
+            best_bid_idx: self.best_bid_idx,
+            best_ask_idx: self.best_ask_idx,
+        }
+    }
+}
