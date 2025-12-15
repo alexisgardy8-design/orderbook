@@ -58,11 +58,17 @@ impl CoinbaseFeed {
         use crate::triangular_arbitrage::TriangularArbitrageDetector;
         use std::time::Instant;
         
-        // Initialize orderbooks for the three pairs
+        // Initialize orderbooks for the three pairs with appropriate price ranges
+        // ATOM-USD: $1 to $10 (10_000 to 100_000 in i64 format) - currently ~$2.14
+        // ATOM-BTC: 0.000001 to 0.001 BTC (10 to 10_000 in i64 format) - currently ~0.0000239
+        // BTC-USD: $70k to $120k (700_000_000 to 1_200_000_000 in i64 format) - currently ~$90k
         let mut orderbooks = HashMap::new();
-        orderbooks.insert("ATOM-USD".to_string(), Arc::new(Mutex::new(OrderBookImpl::new())));
-        orderbooks.insert("ATOM-BTC".to_string(), Arc::new(Mutex::new(OrderBookImpl::new())));
-        orderbooks.insert("BTC-USD".to_string(), Arc::new(Mutex::new(OrderBookImpl::new())));
+        orderbooks.insert("ATOM-USD".to_string(), 
+            Arc::new(Mutex::new(OrderBookImpl::with_range(10_000, 100_000))));
+        orderbooks.insert("ATOM-BTC".to_string(), 
+            Arc::new(Mutex::new(OrderBookImpl::with_range(10, 10_000))));
+        orderbooks.insert("BTC-USD".to_string(), 
+            Arc::new(Mutex::new(OrderBookImpl::with_range(700_000_000, 1_200_000_000))));
         
         // Create arbitrage detector
         let detector = Arc::new(Mutex::new(
@@ -189,15 +195,14 @@ impl CoinbaseFeed {
                     // Convert price to integer with 4 decimal places precision
                     let price_int = (price * 10000.0) as i64;
                     
-                    if price_int >= 0 && price_int < 200_000 {
-                        let update = Update::Set {
-                            side,
-                            price: price_int,
-                            quantity: (quantity * 1_000_000.0) as u64, // Convert to micros
-                        };
-                        
-                        ob_lock.apply_update(update);
-                    }
+                    // No need to check bounds here, orderbook will handle it
+                    let update = Update::Set {
+                        side,
+                        price: price_int,
+                        quantity: (quantity * 1_000_000.0) as u64, // Convert to micros
+                    };
+                    
+                    ob_lock.apply_update(update);
                 }
             }
             

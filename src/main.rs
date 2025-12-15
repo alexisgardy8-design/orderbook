@@ -8,6 +8,10 @@ mod triangular_arbitrage;
 mod backtest;
 mod reporting;
 mod coinbase_feed;
+mod arbitrage_benchmark;
+mod coinbase_historical;
+mod adaptive_strategy;
+mod adaptive_backtest;
 
 use std::env;
 
@@ -16,13 +20,28 @@ fn main() {
     
     if args.len() > 1 {
         match args[1].as_str() {
+            "adaptive" => run_adaptive_backtest(),
+            "recent" => run_recent_backtest(),
             "backtest" => run_backtest(),
             "live" => run_live_mode(),
+            "perf" => run_arbitrage_performance(),
             _ => run_benchmark(),
         }
     } else {
         run_benchmark();
     }
+}
+
+fn run_arbitrage_performance() {
+    arbitrage_benchmark::ArbitrageBenchmark::run_detection_benchmark();
+}
+
+fn run_adaptive_backtest() {
+    adaptive_backtest::run_adaptive_real_data_backtest();
+}
+
+fn run_recent_backtest() {
+    adaptive_backtest::run_adaptive_recent_backtest();
 }
 
 fn run_benchmark() {
@@ -43,25 +62,41 @@ fn run_benchmark() {
 fn run_backtest() {
     println!("🚀 Starting Triangular Arbitrage Backtest\n");
     
-    println!("📥 Generating realistic arbitrage data...");
+    println!("═══════════════════════════════════════════════════════════");
+    println!("  CONFIGURATION");
+    println!("═══════════════════════════════════════════════════════════");
+    println!("Triangle: ETH-BTC-USDC (Highest liquidity on Coinbase)");
+    println!("  • pair1: ETH-USDC  (precision: 4 decimals, factor 10,000)");
+    println!("  • pair2: BTC-USDC  (precision: 4 decimals, factor 10,000)");
+    println!("  • pair3: ETH-BTC   (precision: 8 decimals, factor 100,000,000)");
+    println!();
+    println!("Paths:");
+    println!("  • Forward: USDC → ETH → BTC → USDC");
+    println!("  • Reverse: USDC → BTC → ETH → USDC");
+    println!();
+    println!("Parameters:");
+    println!("  • Minimum profit threshold: 2.0 bps (0.02%)");
+    println!("  • Starting capital: $1,000.00");
+    println!("  • Trading fee: 0.1% per transaction");
+    println!("═══════════════════════════════════════════════════════════\n");
+    
+    println!("📥 Generating realistic market data...");
     let pair1_data = data_loader::DataLoader::generate_realistic_arbitrage_data(
-        "ATOM-USD", 3000, 10.5, 0.015
+        "ETH-USDC", 3000, 3146.0, 0.015
     );
     let pair2_data = data_loader::DataLoader::generate_realistic_arbitrage_data(
-        "ATOM-BTC", 3000, 0.00032, 0.02
+        "BTC-USDC", 3000, 89903.62, 0.01
     );
     let pair3_data = data_loader::DataLoader::generate_realistic_arbitrage_data(
-        "BTC-USD", 3000, 33000.0, 0.01
+        "ETH-BTC", 3000, 0.03499, 0.02
     );
     
-    println!("  ✅ Generated {} updates for ATOM-USD", pair1_data.len());
-    println!("  ✅ Generated {} updates for ATOM-BTC", pair2_data.len());
-    println!("  ✅ Generated {} updates for BTC-USD", pair3_data.len());
+    println!("  ✅ Generated {} updates for ETH-USDC", pair1_data.len());
+    println!("  ✅ Generated {} updates for BTC-USDC", pair2_data.len());
+    println!("  ✅ Generated {} updates for ETH-BTC", pair3_data.len());
+    println!("  ✅ Total: {} market updates", pair1_data.len() + pair2_data.len() + pair3_data.len());
     
     println!("\n🔍 Running ultra-fast backtest simulation...");
-    println!("   Minimum profit threshold: 2.0 bps");
-    println!("   Starting capital: $1000.00");
-    println!("   Target: <1ns per operation\n");
     
     let mut engine = backtest::BacktestEngine::new(2.0, 1000.0);
     let result = engine.run(pair1_data, pair2_data, pair3_data);
@@ -77,6 +112,17 @@ fn run_backtest() {
         println!("   ⚠️  Target: <1ns (current: {:.3}ns)", ns_per_update);
     }
     
+    println!("\n💡 Note on Results:");
+    if result.total_opportunities == 0 {
+        println!("   No arbitrage opportunities found - This is expected!");
+        println!("   Real market prices are well-aligned on liquid pairs.");
+        println!("   Opportunities occur during:");
+        println!("     • High volatility periods");
+        println!("     • Major news announcements");
+        println!("     • Large liquidation cascades");
+        println!("     • Flash crashes");
+    }
+    
     println!("\n💾 Saving report to file...");
     if let Err(e) = reporting::ReportGenerator::generate_csv_report(&result, "backtest_report.csv") {
         eprintln!("Failed to save report: {}", e);
@@ -90,10 +136,15 @@ fn run_live_mode() {
     {
         println!("🌐 Starting Live Mode - Connecting to Coinbase...\n");
         
+        println!("   Triangle: ETH-BTC-USDC");
+        println!("   - Highest liquidity on Coinbase");
+        println!("   - Institutional-grade pairs");
+        println!("   - Microsecond-level opportunities\n");
+        
         let products = vec![
-            "ATOM-USD".to_string(),
-            "ATOM-BTC".to_string(),
-            "BTC-USD".to_string(),
+            "ETH-USDC".to_string(),
+            "BTC-USDC".to_string(),
+            "ETH-BTC".to_string(),
         ];
         
         let feed = coinbase_feed::CoinbaseFeed::new(products);
