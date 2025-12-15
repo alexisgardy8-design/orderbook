@@ -421,6 +421,22 @@ impl AdaptiveStrategy {
         self.position_type = PositionType::None;
         self.entry_price = None;
     }
+
+    /// Getters pour l'affichage en live
+    pub fn get_current_regime(&self) -> MarketRegime {
+        self.current_regime
+    }
+
+    pub fn get_adx_value(&self) -> f64 {
+        // Calculer la vraie valeur d'ADX si possible
+        // Pour l'instant, approximation basée sur la longueur du buffer
+        if self.adx.tr_values.len() >= self.config.adx_period {
+            // On pourrait calculer la vraie valeur ici
+            25.0 // Valeur placeholder
+        } else {
+            0.0
+        }
+    }
 }
 
 #[cfg(test)]

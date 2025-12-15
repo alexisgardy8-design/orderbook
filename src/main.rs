@@ -7,11 +7,18 @@ mod data_loader;
 mod triangular_arbitrage;
 mod backtest;
 mod reporting;
-mod coinbase_feed;
 mod arbitrage_benchmark;
-mod coinbase_historical;
 mod adaptive_strategy;
-mod adaptive_backtest;
+mod hyperliquid_historical;
+mod hyperliquid_backtest;
+
+#[cfg(feature = "websocket")]
+mod hyperliquid_feed;
+
+// Legacy modules (kept for reference but not used)
+// mod coinbase_feed;
+// mod coinbase_historical;
+// mod adaptive_backtest;
 
 use std::env;
 
@@ -20,10 +27,26 @@ fn main() {
     
     if args.len() > 1 {
         match args[1].as_str() {
-            "adaptive" => run_adaptive_backtest(),
-            "recent" => run_recent_backtest(),
+            "test" => test_hyperliquid(),
+            "trade" => {
+                #[cfg(feature = "websocket")]
+                {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    rt.block_on(async {
+                        if let Err(e) = hyperliquid_feed::run_live_trading().await {
+                            eprintln!("❌ Live trading error: {}", e);
+                        }
+                    });
+                }
+                
+                #[cfg(not(feature = "websocket"))]
+                {
+                    eprintln!("❌ WebSocket feature not enabled");
+                    eprintln!("💡 Compile with: cargo build --release --features websocket");
+                }
+            }
+            "hl-backtest" => run_hyperliquid_backtest(),
             "backtest" => run_backtest(),
-            "live" => run_live_mode(),
             "perf" => run_arbitrage_performance(),
             _ => run_benchmark(),
         }
@@ -36,12 +59,12 @@ fn run_arbitrage_performance() {
     arbitrage_benchmark::ArbitrageBenchmark::run_detection_benchmark();
 }
 
-fn run_adaptive_backtest() {
-    adaptive_backtest::run_adaptive_real_data_backtest();
+fn run_hyperliquid_backtest() {
+    hyperliquid_backtest::run_hyperliquid_backtest();
 }
 
-fn run_recent_backtest() {
-    adaptive_backtest::run_adaptive_recent_backtest();
+fn test_hyperliquid() {
+    hyperliquid_historical::test_hyperliquid_connection();
 }
 
 fn run_benchmark() {
@@ -131,38 +154,10 @@ fn run_backtest() {
     }
 }
 
-fn run_live_mode() {
-    #[cfg(feature = "websocket")]
-    {
-        println!("🌐 Starting Live Mode - Connecting to Coinbase...\n");
-        
-        println!("   Triangle: ETH-BTC-USDC");
-        println!("   - Highest liquidity on Coinbase");
-        println!("   - Institutional-grade pairs");
-        println!("   - Microsecond-level opportunities\n");
-        
-        let products = vec![
-            "ETH-USDC".to_string(),
-            "BTC-USDC".to_string(),
-            "ETH-BTC".to_string(),
-        ];
-        
-        let feed = coinbase_feed::CoinbaseFeed::new(products);
-        
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            if let Err(e) = feed.connect_with_arbitrage().await {
-                eprintln!("❌ Connection error: {}", e);
-            }
-        });
-    }
-    
-    #[cfg(not(feature = "websocket"))]
-    {
-        println!("❌ Live mode not available. Compile with --features websocket");
-        println!("   cargo run --release --features websocket live");
-    }
-}
+// DEPRECATED: Coinbase live mode - Use 'trade' command for Hyperliquid instead
+// fn run_live_mode() {
+//     println!("❌ Legacy Coinbase mode removed. Use: cargo run --release --features websocket trade");
+// }
 
 // ============================================================================
 // CORRECTNESS TESTS
