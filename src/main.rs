@@ -11,9 +11,17 @@ mod arbitrage_benchmark;
 mod adaptive_strategy;
 mod hyperliquid_historical;
 mod hyperliquid_backtest;
+mod position_manager;
+mod order_executor;
 
 #[cfg(feature = "websocket")]
 mod hyperliquid_feed;
+
+#[cfg(feature = "websocket")]
+mod test_live_order;
+
+#[cfg(feature = "websocket")]
+mod hyperliquid_trade;
 
 // Legacy modules (kept for reference but not used)
 // mod coinbase_feed;
@@ -27,6 +35,15 @@ fn main() {
     
     if args.len() > 1 {
         match args[1].as_str() {
+            #[cfg(feature = "websocket")]
+            "test-order" => {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async {
+                    if let Err(e) = test_live_order::run_test_order_execution().await {
+                        eprintln!("❌ Test order error: {}", e);
+                    }
+                });
+            }
             "test" => test_hyperliquid(),
             "trade" => {
                 #[cfg(feature = "websocket")]

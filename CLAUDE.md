@@ -1,15 +1,19 @@
 # 🚀 Hyperliquid Trading Bot - Documentation Technique
 
-**Version:** 0.8.0  
+**Version:** 0.9.1  
 **Langage:** Rust (Edition 2024)  
-**Date:** Décembre 2025  
-**Objectif:** Bot de trading Adaptive Bidirectionnel sur Hyperliquid DEX:
-- 🚀 **Bot Adaptive BIDIRECTIONNEL sur Hyperliquid (DEX)**
+**Date:** Février 2025  
+**Objectif:** Bot de trading Adaptive Bidirectionnel avec LIVE TRADING sur Hyperliquid DEX:
+- 🚀 **Bot Adaptive BIDIRECTIONNEL sur Hyperliquid (DEX) avec LIVE TRADING**
   - Récupération live: WebSocket SOL-PERP 1h candles
   - Récupération historique: API REST (jusqu'à 2 ans de données via pagination)
   - Stratégie: ADX + SuperTrend + Bollinger (Long + Short)
+  - **NOUVEAU: Exécution d'ordres RÉELS sur Mainnet (EIP-712 Signing)**
+  - **NOUVEAU: Gestion complète du cycle de vie des ordres (Place/Cancel)**
+  - **NOUVEAU: Position Management avec Risk Management (2% max loss par trade)**
+  - **NOUVEAU: Real-time P&L tracking et position monitoring**
   - Backtesting: Données réelles Hyperliquid, 208+ jours
-  - **Résultat: +152.61% vs -22.68% buy & hold (+175% outperformance)** 🚀
+  - **Résultat: +152.77% vs -22.58% buy & hold (+175% outperformance)** 🚀
 
 ---
 
@@ -117,6 +121,10 @@ orderbook-td/
     ├── hyperliquid_historical.rs   # 🚀 Récupération données Hyperliquid API REST
     ├── hyperliquid_feed.rs         # 🚀 WebSocket Hyperliquid (live trading)
     ├── hyperliquid_backtest.rs     # 🚀 Backtest Adaptive sur Hyperliquid
+    ├── hyperliquid_trade.rs        # 🔐 Exécution d'ordres Mainnet (EIP-712 + MsgPack)
+    ├── test_live_order.rs          # 🧪 Test unitaire live trading (Place/Cancel)
+    ├── position_manager.rs         # 💰 Position & Bankroll Management (2% Risk Rule)
+    ├── order_executor.rs           # ⚡ Order Execution (Simulation & Interface)
     └── coinbase_historical.rs      # Récupération données Coinbase (legacy)
 ```
 
@@ -136,6 +144,14 @@ TriangularArbitrageDetector (mise à jour cache + détection)
 Opportunités détectées → Logs + Métriques
 ```
 
+### Sécurité & Exécution (Hyperliquid)
+
+Le module `hyperliquid_trade.rs` implémente le protocole de signature complexe requis par Hyperliquid L1 :
+1. **Sérialisation MsgPack**: Ordre strict des champs (`a`, `b`, `p`, `r`, `s`, `t`) et formatage float spécifique.
+2. **Hashing Keccak256**: Hash de l'action sérialisée + Nonce + Vault Address.
+3. **EIP-712 Signing**: Enveloppe "Phantom Agent" pour la signature ECDSA sur la courbe secp256k1.
+4. **Mainnet Ready**: Configuré pour `api.hyperliquid.xyz` (Source "a").
+
 ---
 
 ## 📁 Modules et Fichiers
@@ -149,6 +165,7 @@ Opportunités détectées → Logs + Métriques
 ```bash
 # Testing & Data Validation
 cargo run --release test                       # 🧪 TEST API Hyperliquid + récupération données
+cargo run --release --features websocket -- test-order # 🔐 TEST LIVE ORDER (Mainnet Place/Cancel)
 
 # Backtesting
 cargo run --release hl-backtest                # 🚀 Backtest Adaptive Hyperliquid (208+ jours)
