@@ -245,12 +245,92 @@ impl BollingerBands {
     }
 }
 
+/// RSI (Relative Strength Index)
+#[derive(Debug, Clone)]
+pub struct RSI {
+    period: usize,
+    prices: VecDeque<f64>,
+    prev_avg_gain: Option<f64>,
+    prev_avg_loss: Option<f64>,
+}
+
+impl RSI {
+    pub fn new(period: usize) -> Self {
+        Self {
+            period,
+            prices: VecDeque::new(),
+            prev_avg_gain: None,
+            prev_avg_loss: None,
+        }
+    }
+
+    pub fn update(&mut self, price: f64) -> Option<f64> {
+        self.prices.push_back(price);
+        if self.prices.len() > self.period + 1 {
+            self.prices.pop_front();
+        }
+
+        if self.prices.len() < 2 {
+            return None;
+        }
+
+        // Initial calculation (first time we have enough data)
+        if self.prev_avg_gain.is_none() {
+            if self.prices.len() <= self.period {
+                return None;
+            }
+
+            let mut gains = 0.0;
+            let mut losses = 0.0;
+
+            for i in 1..self.prices.len() {
+                let change = self.prices[i] - self.prices[i - 1];
+                if change > 0.0 {
+                    gains += change;
+                } else {
+                    losses += change.abs();
+                }
+            }
+
+            let avg_gain = gains / self.period as f64;
+            let avg_loss = losses / self.period as f64;
+
+            self.prev_avg_gain = Some(avg_gain);
+            self.prev_avg_loss = Some(avg_loss);
+
+            let rs = if avg_loss == 0.0 { 100.0 } else { avg_gain / avg_loss };
+            return Some(100.0 - (100.0 / (1.0 + rs)));
+        }
+
+        // Smoothed calculation
+        let current_price = *self.prices.back().unwrap();
+        let prev_price = self.prices[self.prices.len() - 2];
+        let change = current_price - prev_price;
+
+        let current_gain = if change > 0.0 { change } else { 0.0 };
+        let current_loss = if change < 0.0 { change.abs() } else { 0.0 };
+
+        let prev_avg_gain = self.prev_avg_gain.unwrap();
+        let prev_avg_loss = self.prev_avg_loss.unwrap();
+
+        let avg_gain = ((prev_avg_gain * (self.period as f64 - 1.0)) + current_gain) / self.period as f64;
+        let avg_loss = ((prev_avg_loss * (self.period as f64 - 1.0)) + current_loss) / self.period as f64;
+
+        self.prev_avg_gain = Some(avg_gain);
+        self.prev_avg_loss = Some(avg_loss);
+
+        let rs = if avg_loss == 0.0 { 100.0 } else { avg_gain / avg_loss };
+        Some(100.0 - (100.0 / (1.0 + rs)))
+    }
+}
+
 /// Configuration de la stratégie adaptative
 #[derive(Debug, Clone)]
 pub struct AdaptiveConfig {
     // Bollinger (Range)
     pub bb_period: usize,
     pub bb_std_dev: f64,
+    pub rsi_period: usize,
     pub rsi_oversold: f64,     // Pas utilisé dans cette version simplifiée
     
     // SuperTrend (Trend)
@@ -267,6 +347,7 @@ impl Default for AdaptiveConfig {
         Self {
             bb_period: 20,
             bb_std_dev: 2.0,
+            rsi_period: 14,
             rsi_oversold: 30.0,
             st_period: 10,
             st_multiplier: 3.0,
@@ -282,9 +363,13 @@ pub struct AdaptiveStrategy {
     bollinger: BollingerBands,
     supertrend: SuperTrend,
     adx: ADX,
+    rsi: RSI,
     current_regime: MarketRegime,
     position_type: PositionType,
     entry_price: Option<f64>,
+    last_adx: f64,
+    last_bollinger: Option<(f64, f64, f64)>,
+    last_rsi: f64,
 }
 
 impl AdaptiveStrategy {
@@ -292,15 +377,20 @@ impl AdaptiveStrategy {
         let bollinger = BollingerBands::new(config.bb_period, config.bb_std_dev);
         let supertrend = SuperTrend::new(config.st_period, config.st_multiplier);
         let adx = ADX::new(config.adx_period);
+        let rsi = RSI::new(config.rsi_period);
 
         Self {
             config,
             bollinger,
             supertrend,
             adx,
+            rsi,
             current_regime: MarketRegime::Ranging,
             position_type: PositionType::None,
             entry_price: None,
+            last_adx: 0.0,
+            last_bollinger: None,
+            last_rsi: 50.0,
         }
     }
 
@@ -310,9 +400,13 @@ impl AdaptiveStrategy {
         let bb_result = self.bollinger.update(close);
         let st_result = self.supertrend.update(high, low, close);
         let adx_result = self.adx.update(high, low, close);
+        let rsi_result = self.rsi.update(close);
 
         let (lower_band, middle_band, upper_band) = match bb_result {
-            Some(bands) => bands,
+            Some(bands) => {
+                self.last_bollinger = Some(bands);
+                bands
+            },
             None => return Signal::Hold,
         };
 
@@ -322,9 +416,16 @@ impl AdaptiveStrategy {
         };
 
         let adx_value = match adx_result {
-            Some(adx) => adx,
+            Some(adx) => {
+                self.last_adx = adx;
+                adx
+            },
             None => return Signal::Hold,
         };
+
+        if let Some(rsi) = rsi_result {
+            self.last_rsi = rsi;
+        }
 
         // 2. Détection du régime de marché
         let new_regime = if adx_value >= self.config.adx_threshold {
@@ -428,14 +529,15 @@ impl AdaptiveStrategy {
     }
 
     pub fn get_adx_value(&self) -> f64 {
-        // Calculer la vraie valeur d'ADX si possible
-        // Pour l'instant, approximation basée sur la longueur du buffer
-        if self.adx.tr_values.len() >= self.config.adx_period {
-            // On pourrait calculer la vraie valeur ici
-            25.0 // Valeur placeholder
-        } else {
-            0.0
-        }
+        self.last_adx
+    }
+
+    pub fn get_bollinger_bands(&self) -> Option<(f64, f64, f64)> {
+        self.last_bollinger
+    }
+
+    pub fn get_rsi_value(&self) -> f64 {
+        self.last_rsi
     }
 }
 

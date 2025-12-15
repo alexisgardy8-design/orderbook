@@ -1,17 +1,18 @@
 # 🚀 Hyperliquid Trading Bot - Documentation Technique
 
-**Version:** 0.9.1  
+**Version:** 1.0.0  
 **Langage:** Rust (Edition 2024)  
 **Date:** Février 2025  
 **Objectif:** Bot de trading Adaptive Bidirectionnel avec LIVE TRADING sur Hyperliquid DEX:
 - 🚀 **Bot Adaptive BIDIRECTIONNEL sur Hyperliquid (DEX) avec LIVE TRADING**
   - Récupération live: WebSocket SOL-PERP 1h candles
   - Récupération historique: API REST (jusqu'à 2 ans de données via pagination)
+  - **Warmup Automatique**: Pré-chargement de 100 bougies historiques au démarrage pour initialiser les indicateurs
   - Stratégie: ADX + SuperTrend + Bollinger (Long + Short)
   - **NOUVEAU: Exécution d'ordres RÉELS sur Mainnet (EIP-712 Signing)**
-  - **NOUVEAU: Gestion complète du cycle de vie des ordres (Place/Cancel)**
   - **NOUVEAU: Position Management avec Risk Management (2% max loss par trade)**
   - **NOUVEAU: Real-time P&L tracking et position monitoring**
+  - **NOUVEAU: Notifications Telegram en temps réel (Trade Open/Close, PnL)** 📱
   - Backtesting: Données réelles Hyperliquid, 208+ jours
   - **Résultat: +152.77% vs -22.58% buy & hold (+175% outperformance)** 🚀
 
@@ -485,6 +486,29 @@ pub fn generate_sample_data(count: usize, symbol: &str) -> Vec<HistoricalUpdate>
 
 ---
 
+### `telegram.rs` - Notifications 📱
+**Fonctionnalités:**
+- Envoi de messages via l'API Telegram Bot
+- Gestion des erreurs réseau
+- Formatage Markdown des messages
+
+**Structure:**
+```rust
+pub struct TelegramBot {
+    client: reqwest::Client,
+    token: String,
+    chat_id: String,
+}
+```
+
+**Utilisation:**
+```rust
+let bot = TelegramBot::new().unwrap();
+bot.send_message("🔔 Trade Closed: +$15.00").await?;
+```
+
+---
+
 ## 📦 Packages et Dépendances
 
 ### `Cargo.toml`
@@ -602,6 +626,17 @@ TOTAL (avec réseau)          ~30 ms           100%
 ---
 
 ## 🎯 Configuration Actuelle
+
+### 🔐 Environment Variables (.env)
+Le fichier `.env` à la racine du projet doit contenir les clés suivantes :
+```bash
+# Hyperliquid Private Key (pour signer les transactions)
+PRIVATE_KEY=0x...
+
+# Telegram Bot Configuration (pour les notifications)
+TELEGRAM_BOT_TOKEN=123456789:ABCdef...
+TELEGRAM_CHAT_ID=123456789
+```
 
 ### Triangle ETH-BTC-USDC
 
@@ -750,6 +785,12 @@ cargo run --release --features websocket -- live
 
 # 6. Mode live - Monitoring SOL-USDC Bollinger+RSI 🆕
 cargo run --release --features websocket -- sol
+
+# 7. Test Telegram Integration 🆕
+cargo run --features websocket -- test-telegram
+
+# 8. Test Market Cycle (Buy -> Sell + Notification) 🆕
+cargo run --features websocket -- test-cycle
 ```
 
 ### Commandes Détaillées
@@ -1431,45 +1472,43 @@ cargo flamegraph --features websocket -- live
 
 1. **Contexte historique:**
    - Projet démarré comme challenge de performance d'orderbook
-   - Évolué vers un bot de trading complet
-   - Performance orderbook atteinte: <1ns (objectif dépassé)
-   - Maintenant focus sur la détection d'opportunités réelles
+   - Évolué vers un bot de trading complet sur Hyperliquid
+   - **Focus actuel**: Live Trading sur Hyperliquid avec notifications Telegram
+   - **Dernière action**: Intégration réussie des notifications Telegram et test de cycle complet (Buy -> Sell)
 
 2. **État du code:**
    - Compilable et fonctionnel
-   - Mode live se connecte et reçoit des données
-   - Aucun bug de compilation
-   - Bug principal: 0 opportunités détectées (prix? stratégie? marché?)
+   - **Telegram**: Module `telegram.rs` opérationnel et intégré dans `hyperliquid_feed.rs`
+   - **Environment**: `.env` géré via `dotenv`
+   - **Tests**: Commandes `test-telegram` et `test-cycle` validées
 
 3. **Décisions de design importantes:**
-   - Vec<u64> direct pour l'orderbook (pas de HashMap) → vitesse
-   - Prix en i64 avec 4 décimales (pas de f64 dans l'orderbook) → précision
-   - level2_batch sans auth (pas besoin de clés API) → simplicité
-   - Détection toutes les 10 updates (pas chaque update) → performance
+   - **Async**: Utilisation de `tokio` et `reqwest` pour les appels API
+   - **Features**: `websocket` feature gate pour les dépendances lourdes
+   - **Architecture**: Séparation claire entre Feed (WebSocket), Strategy (Logique) et Execution (HTTP/Telegram)
 
 4. **Commandes utiles:**
    ```bash
-   # Test rapide
-   cargo run --release benchmark
+   # Test Telegram
+   cargo run --features websocket -- test-telegram
    
-   # Live test
-   cargo run --release --features websocket live
+   # Test Cycle Complet (Trade + Notif)
+   cargo run --features websocket -- test-cycle
    
-   # Clean rebuild
-   cargo clean && cargo build --release --features websocket
+   # Live Trading
+   cargo run --release --features websocket -- live
    ```
 
 5. **Prochaine action suggérée:**
-   - Lance le mode live et observe les prix affichés
-   - Vérifie si ATOM-USD ~$10, BTC-USD ~$95000, ATOM-BTC ~0.0003
-   - Si les prix sont absurdes → bug de conversion encore présent
-   - Si les prix sont corrects → marché trop efficace, ajuster les seuils
+   - Lancer le mode live et surveiller les logs
+   - Vérifier que les notifications partent bien lors des vrais trades
+   - Ajouter des commandes Telegram pour contrôler le bot (ex: `/status`, `/stop`)
 
 ---
 
 **Dernière mise à jour:** 15 décembre 2025  
-**Version:** 0.8.0  
+**Version:** 1.1.0  
 **Auteur:** alexgd  
-**Statut:** HYPERLIQUID-ONLY, PRODUCTION READY  
-**Stratégie Principale:** 🏆 Adaptive Bidirectional (ADX=20) - **+152.61% sur 208j (Hyperliquid SOL-PERP)**  
-**Nouvelles Capacités:** Support 1-2 ans de données via pagination automatique
+**Statut:** HYPERLIQUID LIVE + TELEGRAM  
+**Stratégie Principale:** 🏆 Adaptive Bidirectional (ADX=20)  
+**Nouvelles Capacités:** Notifications Telegram temps réel 📱

@@ -1,0 +1,420 @@
+   Compiling rust-3 v0.1.0 (/home/alexgd/esilv/rust/orderbook-td)
+warning: unused import: `std::env`
+  --> src/test_live_order.rs:6:5
+   |
+ 6 | use std::env;
+   |     ^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> src/main.rs:21:1
+   |
+21 | mod test_live_order;
+   | ^^^^^^^^^^^^^^^^^^^^
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `v`
+   --> src/hyperliquid_historical.rs:301:44
+    |
+301 |                     if let Ok((o, h, l, c, v)) = candle.to_ohlc() {
+    |                                            ^
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+help: if this is intentional, prefix it with an underscore
+    |
+301 |                     if let Ok((o, h, l, c, _v)) = candle.to_ohlc() {
+    |                                            +
+help: you might have meant to pattern match on the similarly named constant `INITIAL_BANKROLL_USDC`
+    |
+301 -                     if let Ok((o, h, l, c, v)) = candle.to_ohlc() {
+301 +                     if let Ok((o, h, l, c, hyperliquid_feed::INITIAL_BANKROLL_USDC)) = candle.to_ohlc() {
+    |
+
+warning: field `name` is never read
+ --> src/benchmarks.rs:6:9
+  |
+5 | pub struct BenchmarkResult {
+  |            --------------- field in this struct
+6 |     pub name: String,
+  |         ^^^^
+  |
+  = note: `BenchmarkResult` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: variant `Remove` is never constructed
+  --> src/interfaces.rs:34:5
+   |
+24 | pub enum Update {
+   |          ------ variant in this enum
+...
+34 |     Remove { price: Price, side: Side },
+   |     ^^^^^^
+   |
+   = note: `Update` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: methods `get_top_levels` and `get_total_quantity` are never used
+  --> src/interfaces.rs:65:8
+   |
+38 | pub trait OrderBook: Send + Sync {
+   |           --------- methods in this trait
+...
+65 |     fn get_top_levels(&self, side: Side, n: usize) -> Vec<(Price, Quantity)>;
+   |        ^^^^^^^^^^^^^^
+...
+68 |     fn get_total_quantity(&self, side: Side) -> Quantity;
+   |        ^^^^^^^^^^^^^^^^^^
+
+warning: field `symbol` is never read
+  --> src/data_loader.rs:10:9
+   |
+ 8 | pub struct HistoricalUpdate {
+   |            ---------------- field in this struct
+ 9 |     pub timestamp: u64,
+10 |     pub symbol: String,
+   |         ^^^^^^
+   |
+   = note: `HistoricalUpdate` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated functions `load_from_csv` and `generate_sample_data` are never used
+   --> src/data_loader.rs:17:12
+    |
+ 16 | impl DataLoader {
+    | --------------- associated functions in this implementation
+ 17 |     pub fn load_from_csv<P: AsRef<Path>>(
+    |            ^^^^^^^^^^^^^
+...
+113 |     pub fn generate_sample_data(
+    |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `update_price_cache_with_refs` and `detect_opportunities_with_refs` are never used
+   --> src/triangular_arbitrage.rs:78:8
+    |
+ 41 | impl TriangularArbitrageDetector {
+    | -------------------------------- methods in this implementation
+...
+ 78 |     fn update_price_cache_with_refs(&mut self, ob1: &OrderBookImpl, ob2: &OrderBookImpl, ob3: &OrderBookImpl) {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+109 |     pub fn detect_opportunities_with_refs(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `get_trend` is never used
+   --> src/adaptive_strategy.rs:193:12
+    |
+128 | impl SuperTrend {
+    | --------------- method in this implementation
+...
+193 |     pub fn get_trend(&self) -> bool {
+    |            ^^^^^^^^^
+
+warning: field `rsi_oversold` is never read
+   --> src/adaptive_strategy.rs:254:9
+    |
+250 | pub struct AdaptiveConfig {
+    |            -------------- field in this struct
+...
+254 |     pub rsi_oversold: f64,     // Pas utilisé dans cette version simplifiée
+    |         ^^^^^^^^^^^^
+    |
+    = note: `AdaptiveConfig` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: methods `get_regime` and `reset` are never used
+   --> src/adaptive_strategy.rs:408:12
+    |
+290 | impl AdaptiveStrategy {
+    | --------------------- methods in this implementation
+...
+408 |     pub fn get_regime(&self) -> MarketRegime {
+    |            ^^^^^^^^^^
+...
+416 |     pub fn reset(&mut self) {
+    |            ^^^^^
+
+warning: field `data_points` is never read
+  --> src/hyperliquid_backtest.rs:21:9
+   |
+ 9 | pub struct HyperliquidBacktestResults {
+   |            -------------------------- field in this struct
+...
+21 |     pub data_points: usize,
+   |         ^^^^^^^^^^^
+   |
+   = note: `HyperliquidBacktestResults` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `entry_price`, `exit_price`, `profit_pct`, and `trade_type` are never read
+  --> src/hyperliquid_backtest.rs:27:5
+   |
+26 | struct Trade {
+   |        ----- fields in this struct
+27 |     entry_price: f64,
+   |     ^^^^^^^^^^^
+28 |     exit_price: f64,
+   |     ^^^^^^^^^^
+29 |     profit_pct: f64,
+   |     ^^^^^^^^^^
+30 |     profit_usd: f64,
+31 |     trade_type: String, // "Range", "Trend", "Short"
+   |     ^^^^^^^^^^
+   |
+   = note: `Trade` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: variant `None` is never constructed
+  --> src/position_manager.rs:48:5
+   |
+47 | pub enum PositionState {
+   |          ------------- variant in this enum
+48 |     None,
+   |     ^^^^
+   |
+   = note: `PositionState` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `stop_loss_pct` and `take_profit_price` are never read
+  --> src/position_manager.rs:62:9
+   |
+55 | pub struct OpenPosition {
+   |            ------------ fields in this struct
+...
+62 |     pub stop_loss_pct: f64,           // Pourcentage du SL
+   |         ^^^^^^^^^^^^^
+63 |     pub take_profit_price: Option<f64>, // TP optionnel
+   |         ^^^^^^^^^^^^^^^^^
+   |
+   = note: `OpenPosition` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: methods `is_take_profit_hit` and `set_take_profit` are never used
+   --> src/position_manager.rs:142:12
+    |
+ 68 | impl OpenPosition {
+    | ----------------- methods in this implementation
+...
+142 |     pub fn is_take_profit_hit(&self, current_price: f64) -> bool {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+154 |     pub fn set_take_profit(&mut self, tp_price: f64) {
+    |            ^^^^^^^^^^^^^^^
+
+warning: fields `entry_price`, `entry_time`, `exit_time`, and `trade_type` are never read
+   --> src/position_manager.rs:168:9
+    |
+167 | pub struct ClosedTrade {
+    |            ----------- fields in this struct
+168 |     pub entry_price: f64,
+    |         ^^^^^^^^^^^
+...
+173 |     pub entry_time: u64,
+    |         ^^^^^^^^^^
+174 |     pub exit_time: u64,
+    |         ^^^^^^^^^
+175 |     pub trade_type: String, // "Long" or "Short"
+    |         ^^^^^^^^^^
+    |
+    = note: `ClosedTrade` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `winning_trades`, `losing_trades`, `avg_profit`, and `initial_balance` are never read
+   --> src/position_manager.rs:340:9
+    |
+338 | pub struct TradingStats {
+    |            ------------ fields in this struct
+339 |     pub total_trades: usize,
+340 |     pub winning_trades: usize,
+    |         ^^^^^^^^^^^^^^
+341 |     pub losing_trades: usize,
+    |         ^^^^^^^^^^^^^
+...
+344 |     pub avg_profit: f64,
+    |         ^^^^^^^^^^
+345 |     pub current_balance: f64,
+346 |     pub initial_balance: f64,
+    |         ^^^^^^^^^^^^^^^
+    |
+    = note: `TradingStats` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: struct `HyperliquidOrder` is never constructed
+ --> src/order_executor.rs:8:12
+  |
+8 | pub struct HyperliquidOrder {
+  |            ^^^^^^^^^^^^^^^^
+
+warning: struct `OrderRequest` is never constructed
+  --> src/order_executor.rs:14:12
+   |
+14 | pub struct OrderRequest {
+   |            ^^^^^^^^^^^^
+
+warning: struct `OrderResponse` is never constructed
+  --> src/order_executor.rs:28:12
+   |
+28 | pub struct OrderResponse {
+   |            ^^^^^^^^^^^^^
+
+warning: struct `OrderResponseData` is never constructed
+  --> src/order_executor.rs:34:12
+   |
+34 | pub struct OrderResponseData {
+   |            ^^^^^^^^^^^^^^^^^
+
+warning: struct `SimulatedOrder` is never constructed
+  --> src/order_executor.rs:41:12
+   |
+41 | pub struct SimulatedOrder {
+   |            ^^^^^^^^^^^^^^
+
+warning: struct `OrderExecutor` is never constructed
+  --> src/order_executor.rs:51:12
+   |
+51 | pub struct OrderExecutor {
+   |            ^^^^^^^^^^^^^
+
+warning: associated items `new`, `market_order`, `limit_order`, and `close_position` are never used
+   --> src/order_executor.rs:57:12
+    |
+ 56 | impl OrderExecutor {
+    | ------------------ associated items in this implementation
+ 57 |     pub fn new() -> Self {
+    |            ^^^
+...
+ 65 |     pub fn market_order(
+    |            ^^^^^^^^^^^^
+...
+ 85 |     pub fn limit_order(
+    |            ^^^^^^^^^^^
+...
+107 |     pub fn close_position(
+    |            ^^^^^^^^^^^^^^
+
+warning: field `next_order_id` is never read
+   --> src/order_executor.rs:127:5
+    |
+126 | pub struct OrderSimulator {
+    |            -------------- field in this struct
+127 |     next_order_id: u64,
+    |     ^^^^^^^^^^^^^
+
+warning: methods `market_order` and `limit_order` are never used
+   --> src/order_executor.rs:138:12
+    |
+130 | impl OrderSimulator {
+    | ------------------- methods in this implementation
+...
+138 |     pub fn market_order(
+    |            ^^^^^^^^^^^^
+...
+167 |     pub fn limit_order(
+    |            ^^^^^^^^^^^
+
+warning: field `method` is never read
+  --> src/hyperliquid_feed.rs:45:5
+   |
+44 | struct SubscriptionResponse {
+   |        -------------------- field in this struct
+45 |     method: String,
+   |     ^^^^^^
+   |
+   = note: `SubscriptionResponse` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `order_simulator` is never read
+  --> src/hyperliquid_feed.rs:56:5
+   |
+50 | pub struct HyperliquidFeed {
+   |            --------------- field in this struct
+...
+56 |     order_simulator: crate::order_executor::OrderSimulator,
+   |     ^^^^^^^^^^^^^^^
+
+warning: method `display_signal` is never used
+   --> src/hyperliquid_feed.rs:496:8
+    |
+ 61 | impl HyperliquidFeed {
+    | -------------------- method in this implementation
+...
+496 |     fn display_signal(&self, signal: crate::adaptive_strategy::Signal) {
+    |        ^^^^^^^^^^^^^^
+
+warning: field `status` is never read
+  --> src/hyperliquid_trade.rs:90:9
+   |
+89 | pub struct ExchangeResponse {
+   |            ---------------- field in this struct
+90 |     pub status: String,
+   |         ^^^^^^
+   |
+   = note: `ExchangeResponse` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `statuses` is never read
+   --> src/hyperliquid_trade.rs:101:9
+    |
+100 |     Cancel {
+    |     ------ field in this variant
+101 |         statuses: Vec<serde_json::Value>,
+    |         ^^^^^^^^
+    |
+    = note: `ExchangeResponseData` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `private_key_hex` is never read
+   --> src/hyperliquid_trade.rs:107:5
+    |
+106 | pub struct HyperliquidTrader {
+    |            ----------------- field in this struct
+107 |     private_key_hex: String,
+    |     ^^^^^^^^^^^^^^^
+
+warning: method `get_wallet_address` is never used
+   --> src/hyperliquid_trade.rs:163:12
+    |
+114 | impl HyperliquidTrader {
+    | ---------------------- method in this implementation
+...
+163 |     pub fn get_wallet_address(&self) -> &str {
+    |            ^^^^^^^^^^^^^^^^^^
+
+warning: `rust-3` (bin "rust-3") generated 34 warnings (run `cargo fix --bin "rust-3"` to apply 2 suggestions)
+    Finished `release` profile [optimized] target(s) in 31.17s
+     Running `target/release/rust-3 trade`
+
+🔄 Starting trading loop...
+
+╔════════════════════════════════════════════════════════════════╗
+║  🚀 HYPERLIQUID LIVE TRADING BOT - ADAPTIVE STRATEGY          ║
+╚════════════════════════════════════════════════════════════════╝
+
+🔥 Warming up indicators with historical data...
+📥 Fetching historical data from Hyperliquid...
+   Coin:     SOL
+   Interval: 1h
+   Start:    1765449753072 (2025-12-11 10:42:33 UTC)
+   End:      1765809753072 (2025-12-15 14:42:33 UTC)
+✅ Received 101 candles
+
+📊 Data Range:
+   First candle: 1765447200000 (2025-12-11 10:00:00 UTC)
+   Last candle:  1765807200000 (2025-12-15 14:00:00 UTC)
+
+🕯️  First Candle:
+   Open:   $130.86
+   High:   $131.03
+   Low:    $130.45
+   Close:  $130.78
+   Volume: 14980.54
+✅ Fetched 101 historical candles for warmup
+✅ Indicators warmed up! Buffer size: 100
+   ADX Value:      25.00
+   Market Regime:  Trending
+   Position Type:  None
+   Mode:           🚀 TREND (SuperTrend Bidirectional)
+⚙️  Configuration:
+   DEX:              Hyperliquid
+   Pair:             SOL-PERP
+   Timeframe:        1h
+   Strategy:         Adaptive Bidirectional (Long + Short)
+   ADX Threshold:    20.0
+   Risk per Trade:   2% max loss
+   Bankroll (USDC):  $10000.00
+   Mode:             🔴 DRY RUN (signaux uniquement)
+
+🌐 Connecting to Hyperliquid WebSocket...
+✅ Connected to wss://api.hyperliquid.xyz/ws
+
+📡 Subscribing to SOL candles (1h)...
+✅ Subscription confirmed: Object {"coin": String("SOL"), "interval": String("1h"), "type": String("candle")}
+
+🔄 Waiting for candle data...
+

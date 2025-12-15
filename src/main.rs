@@ -15,10 +15,19 @@ mod position_manager;
 mod order_executor;
 
 #[cfg(feature = "websocket")]
+mod telegram;
+
+#[cfg(feature = "websocket")]
 mod hyperliquid_feed;
 
 #[cfg(feature = "websocket")]
 mod test_live_order;
+
+#[cfg(feature = "websocket")]
+mod test_sl_order;
+
+#[cfg(feature = "websocket")]
+mod test_market_cycle;
 
 #[cfg(feature = "websocket")]
 mod hyperliquid_trade;
@@ -31,6 +40,9 @@ mod hyperliquid_trade;
 use std::env;
 
 fn main() {
+    // Load .env file
+    dotenv::dotenv().ok();
+
     let args: Vec<String> = env::args().collect();
     
     if args.len() > 1 {
@@ -41,6 +53,39 @@ fn main() {
                 rt.block_on(async {
                     if let Err(e) = test_live_order::run_test_order_execution().await {
                         eprintln!("❌ Test order error: {}", e);
+                    }
+                });
+            }
+            #[cfg(feature = "websocket")]
+            "test-sl" => {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async {
+                    if let Err(e) = test_sl_order::run_test_sl_order().await {
+                        eprintln!("❌ Test SL error: {}", e);
+                    }
+                });
+            }
+            #[cfg(feature = "websocket")]
+            "test-cycle" => {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async {
+                    if let Err(e) = test_market_cycle::run_test_market_cycle().await {
+                        eprintln!("❌ Test Cycle error: {}", e);
+                    }
+                });
+            }
+            #[cfg(feature = "websocket")]
+            "test-telegram" => {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async {
+                    println!("🤖 Testing Telegram Bot...");
+                    if let Some(bot) = telegram::TelegramBot::new() {
+                        match bot.send_message("🔔 *Test Notification*\n\nCeci est un test du bot de trading Rust.").await {
+                            Ok(_) => println!("✅ Message sent successfully! Check your Telegram."),
+                            Err(e) => eprintln!("❌ Failed to send message: {}", e),
+                        }
+                    } else {
+                        eprintln!("❌ Telegram Bot not configured. Check .env file.");
                     }
                 });
             }

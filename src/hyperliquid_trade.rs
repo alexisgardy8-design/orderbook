@@ -25,13 +25,23 @@ pub struct OrderWire {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OrderTypeWire {
-    pub limit: LimitOrderType,
+#[serde(rename_all = "camelCase")]
+pub enum OrderTypeWire {
+    Limit(LimitOrderType),
+    Trigger(TriggerOrderType),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LimitOrderType {
     pub tif: String, // "Gtc"
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerOrderType {
+    pub is_market: bool,
+    pub trigger_px: String,
+    pub tpsl: String, // "tp" or "sl"
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +53,12 @@ pub enum Action {
     },
     Cancel {
         cancels: Vec<CancelRequest>,
+    },
+    UpdateLeverage {
+        asset: u32,
+        #[serde(rename = "isCross")]
+        is_cross: bool,
+        leverage: u32,
     },
 }
 
@@ -66,6 +82,16 @@ struct CancelActionWire {
     #[serde(rename = "type")]
     type_: String,
     cancels: Vec<CancelRequest>,
+}
+
+#[derive(Serialize)]
+struct UpdateLeverageWire {
+    #[serde(rename = "type")]
+    type_: String,
+    asset: u32,
+    #[serde(rename = "isCross")]
+    is_cross: bool,
+    leverage: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -208,6 +234,15 @@ impl HyperliquidTrader {
                     cancels,
                 };
                 wire.serialize(&mut serializer)?;
+            },
+            Action::UpdateLeverage { asset, is_cross, leverage } => {
+                let wire = UpdateLeverageWire {
+                    type_: "updateLeverage".to_string(),
+                    asset,
+                    is_cross,
+                    leverage,
+                };
+                wire.serialize(&mut serializer)?;
             }
         }
 
@@ -316,9 +351,7 @@ impl HyperliquidTrader {
                 p: Self::float_to_wire(px),
                 s: Self::float_to_wire(sz),
                 r: false,
-                t: OrderTypeWire {
-                    limit: LimitOrderType { tif: "Gtc".to_string() }
-                }
+                t: OrderTypeWire::Limit(LimitOrderType { tif: "Gtc".to_string() }),
             };
 
             let action = Action::Order {
@@ -365,10 +398,95 @@ impl HyperliquidTrader {
                             let oid = resting["oid"].as_u64().ok_or("Missing OID in resting status")?;
                             println!("✅ Order placed! OID: {}", oid);
                             return Ok(oid);
+                        } else if let Some(filled) = first_status.get("filled") {
+                            let oid = filled["oid"].as_u64().ok_or("Missing OID in filled status")?;
+                            println!("✅ Order filled immediately! OID: {}", oid);
+                            return Ok(oid);
                         }
                     }
                     println!("✅ Order processed but not resting (filled/canceled?): {:?}", statuses);
                     return Ok(0); // Or handle differently
+                }
+            }
+            
+            Err(format!("API Error: {}", body).into())
+        }
+
+        #[cfg(not(feature = "websocket"))]
+        {
+            Err("WebSocket feature required".into())
+        }
+    }
+
+    /// Place a Stop Loss order (Market Trigger)
+    pub async fn place_stop_loss_order(
+        &self,
+        coin: &str,
+        is_buy: bool,
+        trigger_px: f64,
+        sz: f64,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        println!("\n📝 Placing Stop Loss order on Hyperliquid...");
+        
+        let asset_index = self.fetch_asset_index(coin).await?;
+        println!("   Asset Index for {}: {}", coin, asset_index);
+
+        #[cfg(feature = "websocket")]
+        {
+            let order = OrderWire {
+                a: asset_index,
+                b: is_buy,
+                p: Self::float_to_wire(trigger_px),
+                s: Self::float_to_wire(sz),
+                r: true, // Reduce Only for SL
+                t: OrderTypeWire::Trigger(TriggerOrderType {
+                    is_market: true,
+                    trigger_px: Self::float_to_wire(trigger_px),
+                    tpsl: "sl".to_string(),
+                }),
+            };
+
+            let action = Action::Order {
+                orders: vec![order],
+                grouping: "na".to_string(),
+            };
+
+            let nonce = Self::get_nonce();
+            println!("🔐 Signing SL order...");
+            let signature = self.sign_action(action.clone(), nonce)?;
+
+            let request = ExchangeRequest {
+                action,
+                nonce,
+                signature,
+                vault_address: None,
+            };
+
+            println!("📤 Sending SL to https://api.hyperliquid.xyz/exchange");
+            let client = reqwest::Client::new();
+            let response = client
+                .post("https://api.hyperliquid.xyz/exchange")
+                .json(&request)
+                .send()
+                .await?;
+
+            let status = response.status();
+            let body = response.text().await?;
+            
+            println!("📥 Response Status: {}", status);
+
+            if status.is_success() {
+                let resp: ExchangeResponse = serde_json::from_str(&body)?;
+                if let Some(ExchangeResponseData::Order { statuses }) = resp.response {
+                    if let Some(first_status) = statuses.first() {
+                        if let Some(resting) = first_status.get("resting") {
+                            let oid = resting["oid"].as_u64().ok_or("Missing OID in resting status")?;
+                            println!("✅ SL Order placed! OID: {}", oid);
+                            return Ok(oid);
+                        }
+                    }
+                    println!("✅ SL Order processed: {:?}", statuses);
+                    return Ok(0);
                 }
             }
             
@@ -412,7 +530,7 @@ impl HyperliquidTrader {
                 vault_address: None,
             };
 
-            // let request_json = serde_json::to_string(&request)?;
+            let request_json = serde_json::to_string(&request)?;
             // println!("📤 Cancel Request: {}", request_json);
 
             let client = reqwest::Client::new();
@@ -436,5 +554,92 @@ impl HyperliquidTrader {
         }
         #[cfg(not(feature = "websocket"))]
         { Err("WebSocket feature required".into()) }
+    }
+
+    /// Update Leverage for an asset
+    pub async fn update_leverage(
+        &self,
+        coin: &str,
+        leverage: u32,
+        is_cross: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        println!("\n⚙️  Updating leverage for {} to {}x (Cross: {})...", coin, leverage, is_cross);
+        
+        let asset_index = self.fetch_asset_index(coin).await?;
+
+        #[cfg(feature = "websocket")]
+        {
+            let action = Action::UpdateLeverage {
+                asset: asset_index,
+                is_cross,
+                leverage,
+            };
+
+            let nonce = Self::get_nonce();
+            let signature = self.sign_action(action.clone(), nonce)?;
+
+            let request = ExchangeRequest {
+                action,
+                nonce,
+                signature,
+                vault_address: None,
+            };
+
+            let request_json = serde_json::to_string(&request)?;
+            println!("📤 Update Leverage Request: {}", request_json);
+
+            let client = reqwest::Client::new();
+            let response = client
+                .post("https://api.hyperliquid.xyz/exchange")
+                .header("Content-Type", "application/json")
+                .body(request_json)
+                .send()
+                .await?;
+
+            let status = response.status();
+            let body = response.text().await?;
+            
+            println!("📥 Response Status: {}", status);
+            println!("📥 Response Body: {}", body);
+
+            if status.is_success() {
+                println!("✅ Leverage updated successfully!");
+                Ok(())
+            } else {
+                Err(format!("Failed to update leverage: {}", body).into())
+            }
+        }
+        #[cfg(not(feature = "websocket"))]
+        { Err("WebSocket feature required".into()) }
+    }
+
+    /// Place a Market Order (Limit with aggressive price)
+    pub async fn place_market_order(
+        &self,
+        coin: &str,
+        is_buy: bool,
+        sz: f64,
+        current_price: f64,
+        slippage_pct: f64, // e.g. 0.05 for 5%
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        // Calculate aggressive price
+        let aggressive_price = if is_buy {
+            current_price * (1.0 + slippage_pct)
+        } else {
+            current_price * (1.0 - slippage_pct)
+        };
+        
+        // Round to appropriate decimals (assuming 2 for SOL for now, ideally fetch from meta)
+        let aggressive_price = (aggressive_price * 100.0).round() / 100.0;
+
+        println!("\n🚀 Placing MARKET order (Limit @ {:.2})...", aggressive_price);
+        
+        // Use "Ioc" (Immediate or Cancel) for true market behavior, or "Gtc" with aggressive price.
+        // Hyperliquid frontend uses Gtc with aggressive price.
+        // Let's use place_limit_order but with aggressive price.
+        // We need to modify place_limit_order to accept TIF or create a new internal helper.
+        // For now, reusing place_limit_order which uses Gtc is fine for "Market" behavior if price is crossing.
+        
+        self.place_limit_order(coin, is_buy, aggressive_price, sz).await
     }
 }

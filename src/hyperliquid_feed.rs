@@ -8,6 +8,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use futures_util::{SinkExt, StreamExt};
 use std::collections::VecDeque;
 use crate::position_manager::PositionState;
+use crate::hyperliquid_trade::HyperliquidTrader;
 
 const HYPERLIQUID_WS_URL: &str = "wss://api.hyperliquid.xyz/ws";
 const COIN: &str = "SOL";
@@ -53,12 +54,40 @@ pub struct HyperliquidFeed {
     strategy: crate::adaptive_strategy::AdaptiveStrategy,
     position_manager: crate::position_manager::PositionManager,
     order_simulator: crate::order_executor::OrderSimulator,
+    trader: Option<HyperliquidTrader>,
+    is_live: bool,
+    telegram: Option<crate::telegram::TelegramBot>,
 }
 
 impl HyperliquidFeed {
-    pub fn new(coin: String, interval: String) -> Self {
+    pub fn new(coin: String, interval: String, is_live: bool) -> Self {
         use crate::adaptive_strategy::AdaptiveConfig;
         
+        let trader = if is_live {
+            match HyperliquidTrader::new() {
+                Ok(t) => {
+                    println!("✅ LIVE TRADING ENABLED - Wallet: {}", t.wallet_address);
+                    Some(t)
+                },
+                Err(e) => {
+                    eprintln!("❌ Failed to initialize trader: {}", e);
+                    eprintln!("⚠️  Falling back to DRY RUN mode");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let is_trader_ready = trader.is_some();
+        
+        let telegram = crate::telegram::TelegramBot::new();
+        if telegram.is_some() {
+            println!("✅ Telegram Notifications Enabled");
+        } else {
+            println!("⚠️  Telegram Notifications Disabled (Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID)");
+        }
+
         Self {
             coin,
             interval,
@@ -69,6 +98,9 @@ impl HyperliquidFeed {
             }),
             position_manager: crate::position_manager::PositionManager::new(INITIAL_BANKROLL_USDC),
             order_simulator: crate::order_executor::OrderSimulator::new(),
+            trader,
+            is_live: is_live && is_trader_ready, // Ensure is_live is false if trader init failed
+            telegram,
         }
     }
 
@@ -79,12 +111,72 @@ impl HyperliquidFeed {
         Ok(INITIAL_BANKROLL_USDC)
     }
 
+    /// Récupère les données historiques pour chauffer les indicateurs
+    async fn warmup(&mut self) {
+        println!("🔥 Warming up indicators with historical data...");
+        
+        let end_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        
+        // 100 heures en arrière (pour être sûr d'avoir assez de données)
+        let start_time = end_time - (100 * 60 * 60 * 1000);
+        
+        let fetcher = crate::hyperliquid_historical::HyperliquidHistoricalData::new(
+            self.coin.clone(), 
+            self.interval.clone()
+        );
+
+        // Exécuter dans un thread bloquant car ureq est synchrone
+        let candles_result = tokio::task::spawn_blocking(move || {
+            fetcher.fetch_candles(start_time, end_time).map_err(|e| e.to_string())
+        }).await;
+
+        match candles_result {
+            Ok(Ok(candles)) => {
+                println!("✅ Fetched {} historical candles for warmup", candles.len());
+                
+                for h_candle in candles {
+                    // Conversion manuelle car les types sont différents (String vs f64)
+                    if let Ok((o, h, l, c, v)) = h_candle.to_ohlc() {
+                        let candle = HyperCandle {
+                            t: h_candle.t,
+                            close_t: h_candle.close_t,
+                            s: h_candle.s,
+                            i: h_candle.i,
+                            o, h, l, c, v,
+                            n: h_candle.n,
+                        };
+                        
+                        // On utilise process_candle mais sans affichage pour le warmup
+                        self.candle_buffer.push_back(candle.clone());
+                        if self.candle_buffer.len() > CANDLE_BUFFER_SIZE {
+                            self.candle_buffer.pop_front();
+                        }
+                        
+                        // Update strategy state without triggering signals
+                        self.strategy.update(candle.h, candle.l, candle.c);
+                    }
+                }
+                println!("✅ Indicators warmed up! Buffer size: {}", self.candle_buffer.len());
+                let last_price = self.candle_buffer.back().map(|c| c.c);
+                self.display_indicators(last_price);
+            },
+            Ok(Err(e)) => eprintln!("❌ Failed to fetch historical data: {}", e),
+            Err(e) => eprintln!("❌ Task join error: {}", e),
+        }
+    }
+
     /// Connexion au WebSocket et trading live
     pub async fn connect_and_trade(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         println!("\n╔════════════════════════════════════════════════════════════════╗");
         println!("║  🚀 HYPERLIQUID LIVE TRADING BOT - ADAPTIVE STRATEGY          ║");
         println!("╚════════════════════════════════════════════════════════════════╝\n");
         
+        // Warmup indicators first
+        self.warmup().await;
+
         // Récupérer la bankroll de l'utilisateur
         let user_bankroll = match self.fetch_user_bankroll().await {
             Ok(balance) => balance,
@@ -102,7 +194,21 @@ impl HyperliquidFeed {
         println!("   ADX Threshold:    20.0");
         println!("   Risk per Trade:   2% max loss");
         println!("   Bankroll (USDC):  ${:.2}", user_bankroll);
-        println!("   Mode:             🔴 DRY RUN (signaux uniquement)\n");
+        if self.is_live {
+            println!("   Mode:             🟢 LIVE TRADING (REAL MONEY)\n");
+            
+            // Set Leverage to 2x (Isolated)
+            if let Some(trader) = &self.trader {
+                println!("⚙️  Setting Leverage to 2x (Isolated)...");
+                if let Err(e) = trader.update_leverage(&self.coin, 2, false).await {
+                    eprintln!("⚠️  Failed to set leverage: {}", e);
+                } else {
+                    println!("✅ Leverage set to 2x");
+                }
+            }
+        } else {
+            println!("   Mode:             🔴 DRY RUN (signaux uniquement)\n");
+        }
 
         println!("🌐 Connecting to Hyperliquid WebSocket...");
         let (ws_stream, _) = connect_async(HYPERLIQUID_WS_URL).await?;
@@ -146,7 +252,7 @@ impl HyperliquidFeed {
                                 if let Ok(candles) = serde_json::from_value::<Vec<HyperCandle>>(ws_msg.data) {
                                     for candle in candles {
                                         candle_count += 1;
-                                        self.process_candle(candle, candle_count);
+                                        self.process_candle(candle, candle_count).await;
                                     }
                                 }
                             }
@@ -181,7 +287,7 @@ impl HyperliquidFeed {
     }
 
     /// Traite une bougie reçue et génère des signaux
-    fn process_candle(&mut self, candle: HyperCandle, count: usize) {
+    async fn process_candle(&mut self, candle: HyperCandle, count: usize) {
         // Ajouter au buffer
         self.candle_buffer.push_back(candle.clone());
         if self.candle_buffer.len() > CANDLE_BUFFER_SIZE {
@@ -208,13 +314,13 @@ impl HyperliquidFeed {
             let signal = self.strategy.update(candle.h, candle.l, candle.c);
             
             println!("\n📊 STRATEGY ANALYSIS:");
-            self.display_indicators();
+            self.display_indicators(Some(candle.c));
             
             // Mettre à jour le P&L actuel si position ouverte
             self.position_manager.update_current_pnl(candle.c);
             
             // Traiter les signaux de trading
-            self.handle_trading_signal(signal, candle.c, candle.t);
+            self.handle_trading_signal(signal, candle.c, candle.t).await;
             
             // Afficher l'état de la position
             self.display_position_status();
@@ -226,7 +332,7 @@ impl HyperliquidFeed {
     }
 
     /// Traite les signaux de trading et exécute les ordres (simulés en DRY RUN)
-    fn handle_trading_signal(
+    async fn handle_trading_signal(
         &mut self,
         signal: crate::adaptive_strategy::Signal,
         current_price: f64,
@@ -249,7 +355,33 @@ impl HyperliquidFeed {
                         println!("   Value:      ${:.2}", position.position_value);
                         println!("   SL Price:   ${:.2} (-2%)", position.stop_loss_price);
                         println!("   Available:  ${:.2}", self.position_manager.bankroll.available_balance);
-                        println!("   ⚠️  Mode: DRY RUN - Position simulated only");
+                        
+                        if self.is_live {
+                            if let Some(trader) = &self.trader {
+                                println!("🚀 EXECUTING LIVE ORDER...");
+                                // Use Market Order (Limit with 5% slippage)
+                                match trader.place_market_order(&self.coin, true, position.position_size, current_price, 0.05).await {
+                                    Ok(oid) => {
+                                        println!("✅ LIVE ORDER PLACED: OID {}", oid);
+                                        
+                                        // 🛡️ INTEGRATED STOP LOSS for LONG
+                                        // SL is below entry price
+                                        let sl_pct = 0.05; 
+                                        let sl_price = current_price * (1.0 - sl_pct);
+                                        let sl_price = (sl_price * 100.0).round() / 100.0;
+                                        
+                                        println!("🛡️ PLACING STOP LOSS @ ${:.2} (-5%)...", sl_price);
+                                        match trader.place_stop_loss_order(&self.coin, false, sl_price, position.position_size).await {
+                                            Ok(sl_oid) => println!("✅ STOP LOSS PLACED: OID {}", sl_oid),
+                                            Err(e) => eprintln!("❌ STOP LOSS FAILED: {}", e),
+                                        }
+                                    },
+                                    Err(e) => eprintln!("❌ LIVE ORDER FAILED: {}", e),
+                                }
+                            }
+                        } else {
+                            println!("   ⚠️  Mode: DRY RUN - Position simulated only");
+                        }
                     }
                 }
             }
@@ -263,7 +395,38 @@ impl HyperliquidFeed {
                             println!("   Size:       {:.4} SOL", closed.position_size);
                             println!("   P&L:        ${:+.2} ({:+.1}%)", closed.profit_loss, closed.profit_loss_pct);
                             println!("   Balance:    ${:.2}", self.position_manager.bankroll.total_balance);
-                            println!("   ⚠️  Mode: DRY RUN - Position closed simulated only");
+                            
+                            // 📱 Telegram Notification
+                            if let Some(telegram) = &self.telegram {
+                                let pnl_emoji = if closed.profit_loss >= 0.0 { "🟢" } else { "🔴" };
+                                let message = format!(
+                                    "💰 *Position Closed*\n\n\
+                                    Action: 🔴 SELL (CLOSE LONG)\n\
+                                    Exit Price: ${:.2}\n\
+                                    Size: {:.4} SOL\n\
+                                    P&L: {} ${:+.2} ({:+.2}%)\n\
+                                    Balance: ${:.2}",
+                                    closed.exit_price,
+                                    closed.position_size,
+                                    pnl_emoji, closed.profit_loss, closed.profit_loss_pct,
+                                    self.position_manager.bankroll.total_balance
+                                );
+                                
+                                let _ = telegram.send_message(&message).await;
+                            }
+
+                            if self.is_live {
+                                if let Some(trader) = &self.trader {
+                                    println!("🚀 EXECUTING LIVE ORDER...");
+                                    // Use Market Order to close position
+                                    match trader.place_market_order(&self.coin, false, closed.position_size, current_price, 0.05).await {
+                                        Ok(oid) => println!("✅ LIVE ORDER PLACED: OID {}", oid),
+                                        Err(e) => eprintln!("❌ LIVE ORDER FAILED: {}", e),
+                                    }
+                                }
+                            } else {
+                                println!("   ⚠️  Mode: DRY RUN - Position closed simulated only");
+                            }
                         }
                     }
                 }
@@ -281,7 +444,33 @@ impl HyperliquidFeed {
                         println!("   Value:      ${:.2}", position.position_value);
                         println!("   SL Price:   ${:.2} (+2%)", position.stop_loss_price);
                         println!("   Available:  ${:.2}", self.position_manager.bankroll.available_balance);
-                        println!("   ⚠️  Mode: DRY RUN - Position simulated only");
+                        
+                        if self.is_live {
+                            if let Some(trader) = &self.trader {
+                                println!("🚀 EXECUTING LIVE ORDER...");
+                                // Use Market Order (Limit with 5% slippage)
+                                match trader.place_market_order(&self.coin, false, position.position_size, current_price, 0.05).await {
+                                    Ok(oid) => {
+                                        println!("✅ LIVE ORDER PLACED: OID {}", oid);
+                                        
+                                        // 🛡️ INTEGRATED STOP LOSS for SHORT
+                                        // SL is above entry price
+                                        let sl_pct = 0.05; 
+                                        let sl_price = current_price * (1.0 + sl_pct);
+                                        let sl_price = (sl_price * 100.0).round() / 100.0;
+                                        
+                                        println!("🛡️ PLACING STOP LOSS @ ${:.2} (+5%)...", sl_price);
+                                        match trader.place_stop_loss_order(&self.coin, true, sl_price, position.position_size).await {
+                                            Ok(sl_oid) => println!("✅ STOP LOSS PLACED: OID {}", sl_oid),
+                                            Err(e) => eprintln!("❌ STOP LOSS FAILED: {}", e),
+                                        }
+                                    },
+                                    Err(e) => eprintln!("❌ LIVE ORDER FAILED: {}", e),
+                                }
+                            }
+                        } else {
+                            println!("   ⚠️  Mode: DRY RUN - Position simulated only");
+                        }
                     }
                 }
             }
@@ -295,7 +484,39 @@ impl HyperliquidFeed {
                             println!("   Size:       {:.4} SOL", closed.position_size);
                             println!("   P&L:        ${:+.2} ({:+.1}%)", closed.profit_loss, closed.profit_loss_pct);
                             println!("   Balance:    ${:.2}", self.position_manager.bankroll.total_balance);
-                            println!("   ⚠️  Mode: DRY RUN - Position closed simulated only");
+                            
+                            // 📱 Telegram Notification
+                            if let Some(telegram) = &self.telegram {
+                                let pnl_emoji = if closed.profit_loss >= 0.0 { "🟢" } else { "🔴" };
+                                let message = format!(
+                                    "💰 *Position Closed*\n\n\
+                                    Action: 🔼 COVER SHORT\n\
+                                    Exit Price: ${:.2}\n\
+                                    Size: {:.4} SOL\n\
+                                    P&L: {} ${:+.2} ({:+.2}%)\n\
+                                    Balance: ${:.2}",
+                                    closed.exit_price,
+                                    closed.position_size,
+                                    pnl_emoji, closed.profit_loss, closed.profit_loss_pct,
+                                    self.position_manager.bankroll.total_balance
+                                );
+                                
+                                let _ = telegram.send_message(&message).await;
+                            }
+
+                            if self.is_live {
+                                if let Some(trader) = &self.trader {
+                                    println!("🚀 EXECUTING LIVE ORDER...");
+                                    // Use Market Order to close position
+                                    match trader.place_market_order(&self.coin, true, closed.position_size, current_price, 0.05).await {
+                                        Ok(oid) => println!("✅ LIVE ORDER PLACED: OID {}", oid),
+                                        Err(e) => eprintln!("❌ LIVE ORDER FAILED: {}", e),
+                                    }
+                                }
+                            } else {
+                                println!("   ⚠️  Mode: DRY RUN - Position simulated only");
+                            }
+
                         }
                     }
                 }
@@ -341,12 +562,13 @@ impl HyperliquidFeed {
     }
 
     /// Affiche les indicateurs calculés
-    fn display_indicators(&self) {
+    fn display_indicators(&self, current_price: Option<f64>) {
         use crate::adaptive_strategy::MarketRegime;
         
         let regime = self.strategy.get_current_regime();
         let adx = self.strategy.get_adx_value();
         let position = self.strategy.get_position_type();
+        let bollinger = self.strategy.get_bollinger_bands();
 
         println!("   ADX Value:      {:.2}", adx);
         println!("   Market Regime:  {:?}", regime);
@@ -355,6 +577,22 @@ impl HyperliquidFeed {
         match regime {
             MarketRegime::Ranging => {
                 println!("   Mode:           🎯 RANGE (Bollinger Mean Reversion)");
+                if let Some((lower, middle, upper)) = bollinger {
+                    println!("   Bollinger Bands (H1):");
+                    println!("     Upper: ${:.2}", upper);
+                    println!("     Middle: ${:.2}", middle);
+                    println!("     Lower: ${:.2}", lower);
+                    
+                    if let Some(price) = current_price {
+                        if price > upper {
+                            println!("     Status: 🔴 PRICE ABOVE UPPER BAND (Overbought)");
+                        } else if price < lower {
+                            println!("     Status: 🟢 PRICE BELOW LOWER BAND (Oversold)");
+                        } else {
+                            println!("     Status: ⚪ PRICE INSIDE BANDS");
+                        }
+                    }
+                }
             }
             MarketRegime::Trending => {
                 println!("   Mode:           🚀 TREND (SuperTrend Bidirectional)");
@@ -383,6 +621,19 @@ impl HyperliquidFeed {
 
 /// Fonction publique pour lancer le bot de trading live
 pub async fn run_live_trading() -> Result<(), Box<dyn std::error::Error>> {
-    let mut feed = HyperliquidFeed::new(COIN.to_string(), CANDLE_INTERVAL.to_string());
-    feed.connect_and_trade().await
+    let is_live = std::env::var("LIVE_TRADING").unwrap_or_else(|_| "false".to_string()) == "true";
+    
+    loop {
+        println!("\n🔄 Starting trading loop...");
+        let mut feed = HyperliquidFeed::new(COIN.to_string(), CANDLE_INTERVAL.to_string(), is_live);
+        
+        if let Err(e) = feed.connect_and_trade().await {
+            eprintln!("❌ Trading loop error: {}", e);
+            eprintln!("⏳ Retrying in 5 seconds...");
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        } else {
+            println!("⚠️ Connection closed cleanly. Reconnecting...");
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
 }
