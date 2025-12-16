@@ -30,6 +30,9 @@ mod test_live_order;
 mod test_sl_order;
 
 #[cfg(feature = "websocket")]
+mod test_supabase_log;
+
+#[cfg(feature = "websocket")]
 mod test_market_cycle;
 
 #[cfg(feature = "websocket")]

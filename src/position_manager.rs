@@ -172,6 +172,11 @@ pub struct PositionManager {
     pub initial_balance_session: f64,    // Pour limiter le drawdown (Kill Switch)
     #[cfg(feature = "websocket")]
     pub supabase: Option<crate::supabase::SupabaseClient>,
+    
+    // Indicators for Telegram display
+    pub last_adx: f64,
+    pub last_regime: String,
+    pub last_bollinger: Option<(f64, f64, f64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -197,6 +202,9 @@ impl PositionManager {
             trade_timestamps: VecDeque::new(),
             initial_balance_session: bankroll,
             supabase,
+            last_adx: 0.0,
+            last_regime: "Unknown".to_string(),
+            last_bollinger: None,
         }
     }
 
@@ -208,6 +216,9 @@ impl PositionManager {
             closed_trades: Vec::new(),
             trade_timestamps: VecDeque::new(),
             initial_balance_session: bankroll,
+            last_adx: 0.0,
+            last_regime: "Unknown".to_string(),
+            last_bollinger: None,
         }
     }
 

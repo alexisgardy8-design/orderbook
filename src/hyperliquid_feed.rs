@@ -55,11 +55,11 @@ use tokio::sync::Mutex;
 pub struct HyperliquidFeed {
     coin: String,
     interval: String,
-    candle_buffer: VecDeque<HyperCandle>,
+    pub candle_buffer: VecDeque<HyperCandle>,
     strategy: crate::adaptive_strategy::AdaptiveStrategy,
     position_manager: Arc<Mutex<crate::position_manager::PositionManager>>,
     order_simulator: crate::order_executor::OrderSimulator,
-    trader: Option<HyperliquidTrader>,
+    pub trader: Option<HyperliquidTrader>,
     is_live: bool,
     telegram: Option<crate::telegram::TelegramBot>,
     is_running: Arc<AtomicBool>,
@@ -202,6 +202,14 @@ impl HyperliquidFeed {
                 }
                 let last_price = self.candle_buffer.back().map(|c| c.c);
                 self.display_indicators(last_price);
+
+                // Update Shared State for Telegram immediately after warmup
+                {
+                    let mut pm = self.position_manager.lock().await;
+                    pm.last_adx = self.strategy.get_adx_value();
+                    pm.last_regime = format!("{:?}", self.strategy.get_current_regime());
+                    pm.last_bollinger = self.strategy.get_bollinger_bands();
+                }
             },
             Ok(Err(e)) => eprintln!("❌ Failed to fetch historical data: {}", e),
             Err(e) => eprintln!("❌ Task join error: {}", e),
@@ -436,6 +444,28 @@ impl HyperliquidFeed {
             
             println!("\n📊 STRATEGY ANALYSIS (Closed Candle):");
             self.display_indicators(Some(closed_candle.c));
+
+            // Update Shared State for Telegram
+            {
+                let mut pm = self.position_manager.lock().await;
+                pm.last_adx = self.strategy.get_adx_value();
+                pm.last_regime = format!("{:?}", self.strategy.get_current_regime());
+                pm.last_bollinger = self.strategy.get_bollinger_bands();
+            }
+
+            // 📝 Log to Supabase
+            {
+                let pm = self.position_manager.lock().await;
+                if let Some(client) = &pm.supabase {
+                    let log_msg = format!("Candle Closed: ${:.2} ({:+.2}%) - Signal: {:?}", closed_candle.c, change_pct, signal);
+                    let context = format!("ADX: {:.2}, Regime: {:?}", self.strategy.get_adx_value(), self.strategy.get_current_regime());
+                    // We spawn the log task to avoid blocking the strategy execution
+                    let client_clone = client.clone();
+                    tokio::spawn(async move {
+                        let _ = client_clone.log("INFO", &log_msg, Some(&context)).await;
+                    });
+                }
+            }
             
             // Mettre à jour le P&L actuel si position ouverte
             {
@@ -454,7 +484,7 @@ impl HyperliquidFeed {
     }
 
     /// Traite une bougie reçue et génère des signaux UNIQUEMENT à la clôture
-    async fn process_candle(&mut self, candle: HyperCandle, count: usize, force_close: bool) {
+    pub async fn process_candle(&mut self, candle: HyperCandle, count: usize, force_close: bool) {
         let last_candle_time = self.candle_buffer.back().map(|c| c.t);
 
         // Cas spécial: Force Close (via Watchdog)
@@ -1186,6 +1216,9 @@ pub async fn run_live_trading() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(client) = sb_signal {
             let _ = client.log("INFO", "Bot stopping - Shutdown signal", None).await;
         }
+
+        // Force exit process immediately
+        std::process::exit(0);
     });
 
     // Start Telegram Listener ONCE

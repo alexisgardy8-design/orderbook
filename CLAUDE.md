@@ -160,398 +160,41 @@ Le module `hyperliquid_trade.rs` implémente le protocole de signature complexe 
 
 ---
 
-## 📁 Modules et Fichiers
+## � Modules et Fichiers
 
-### `main.rs` - Point d'Entrée
-**Responsabilités:**
-- CLI avec 7 modes: `benchmark`, `backtest`, `live`, `perf`, `adaptive`, `recent`, `test`, `trade`
-- Initialisation de l'environnement Tokio pour le mode async
+### Core (Racine `src/`)
+- `main.rs`: Point d'entrée. Initialise le runtime Tokio, charge `.env`, lance le WebSocket et le bot Telegram.
+- `interfaces.rs`: Traits `OrderBook` et structures de données communes (`OrderBookL2`, `Tick`, `Candle`).
+- `benchmarks.rs`: Framework de mesure de performance (nanosecondes).
 
-**Commandes Hyperliquid disponibles:**
-```bash
-# Testing & Data Validation
-cargo run --release test                       # 🧪 TEST API Hyperliquid + récupération données
-cargo run --release --features websocket -- test-order # 🔐 TEST LIVE ORDER (Mainnet Place/Cancel)
-cargo run --release --features websocket -- test-supabase # 🗄️ TEST SUPABASE (Connexion + Logs)
+### Trading & Stratégie
+- `hyperliquid_feed.rs`: **Cœur du système**. Gère le WebSocket, l'agrégation des bougies, l'exécution de la stratégie, le logging Supabase et le trading.
+- `adaptive_strategy.rs`: Implémentation de la logique ADX + SuperTrend + Bollinger.
+- `position_manager.rs`: Gestion de l'état des positions, calcul du PnL, Risk Management et persistance Supabase.
+- `hyperliquid_trade.rs`: Client API pour l'exécution des ordres (Signatures EIP-712, Place Order, Cancel, Fills).
+- `hyperliquid_historical.rs`: Client API REST pour récupérer l'historique des bougies (Warmup).
 
-# Backtesting
-cargo run --release hl-backtest                # 🚀 Backtest Adaptive Hyperliquid (208+ jours)
-                                               #    Auto-fetches up to 2 years with pagination
+### Infrastructure & Support
+- `telegram.rs`: Bot Telegram interactif (Commandes, Menus, Notifications).
+- `supabase.rs`: Client Supabase pour le logging asynchrone et la sauvegarde des positions.
+- `order_executor.rs`: Simulateur d'ordres pour le backtesting (Paper Trading local).
+- `reporting.rs`: Génération de rapports de backtest.
 
-# Live Trading
-cargo run --release --features websocket trade # 📡 LIVE TRADING SOL-PERP sur Hyperliquid (WebSocket)
+### Tests & Backtests
+- `test_supabase_log.rs`: **Nouveau**. Test d'intégration pour vérifier le logging Supabase sur clôture de bougie.
+- `test_real_pnl.rs`: Test de calcul du PnL net avec frais réels.
+- `test_live_order.rs`: Test d'envoi d'ordre réel sur le mainnet.
+- `test_sl_order.rs`: Test de placement de Stop Loss.
+- `test_market_cycle.rs`: Simulation de cycle de marché complet.
+- `hyperliquid_backtest.rs`: Moteur de backtest sur données historiques.
+- `backtest.rs`: Ancien moteur de backtest (générique).
 
-# Legacy (deprecated)
-cargo run --release                            # Benchmark orderbook (défaut)
-cargo run --release backtest                   # Backtest arbitrage triangulaire (legacy)
-cargo run --release perf                       # Benchmark performance arbitrage (legacy)
-```
-
----
-
-### `supabase.rs` - Client Base de Données (NOUVEAU)
-**Responsabilités:**
-- Gestion de la persistance des données via l'API REST Supabase
-- Logging structuré des événements du bot
-- Sauvegarde et mise à jour des positions de trading
-
-**Structures:**
-```rust
-pub struct DbLog {
-    pub level: String,
-    pub message: String,
-    pub context: Option<String>,
-}
-
-pub struct DbPosition {
-    pub id: Option<i64>,
-    pub coin: String,
-    pub side: String,
-    pub entry_price: f64,
-    pub size: f64,
-    pub status: String,
-    // ... timestamps et PnL
-}
-```
-
-**Fonctionnalités:**
-- `log()`: Envoie un log asynchrone (INFO, WARN, ERROR)
-- `fetch_open_positions()`: Récupère les positions actives au démarrage (reprise sur panne)
-- `save_position()`: Sauvegarde une nouvelle position ou met à jour une existante
-
----
-
-### `interfaces.rs` - Définitions de Types
-**Types principaux:**
-```rust
-pub type Price = i64;        // Prix entier avec précision variable
-pub type Quantity = u64;     // Quantité en unités entières
-
-pub enum Side { Bid, Ask }
-
-pub enum Update {
-    Set { price: Price, quantity: Quantity, side: Side },
-    Remove { price: Price, side: Side },
-}
-
-pub trait OrderBook: Send + Sync {
-    fn new() -> Self;
-    fn apply_update(&mut self, update: Update);
-    fn get_best_bid(&self) -> Option<Price>;
-    fn get_best_ask(&self) -> Option<Price>;
-    // ... autres méthodes
-}
-```
-
-**Convention des prix (multi-précision):**
-- **ETH-USDC & BTC-USDC**: facteur 10,000 (4 décimales)
-  - Exemple: $3,146.52 → 31,465,200
-- **ETH-BTC**: facteur 100,000,000 (8 décimales)
-  - Exemple: 0.03498123 BTC → 3,498,123
-- Conversion: `prix_float / divisor` pour récupérer le prix réel
-
----
-
-### `orderbook.rs` - Orderbook Ultra-Rapide ⚡
-**Design:**
-- Structure: `Vec<Quantity>` avec indexation directe
-- Range dynamique via `with_range(min_price, max_price)`
-- Optimisations: cache de best bid/ask, opérations O(1)
-
-**Structure:**
-```rust
-pub struct OrderBookImpl {
-    bids: Vec<Quantity>,           // Taille dynamique selon range
-    asks: Vec<Quantity>,           
-    best_bid_idx: Option<usize>,   // Cache
-    best_ask_idx: Option<usize>,   // Cache
-    min_price: i64,                // Range minimum
-    max_price: i64,                // Range maximum
-}
-```
-
-**Fonctions clés:**
-```rust
-fn with_range(min_price: i64, max_price: i64) -> Self  // Constructeur avec range
-fn price_to_idx(&self, price: Price) -> Option<usize>  // Conversion prix → index
-fn apply_update(&mut self, update: Update)             // MAJ orderbook O(1)
-fn get_best_bid(&self) -> Option<Price>                // Meilleur bid O(1)
-fn get_best_ask(&self) -> Option<Price>                // Meilleur ask O(1)
-```
-
-**Performance mesurée:**
-- `apply_update`: **3.13 ns** (moyenne), **0 ns** (P50)
-- `get_best_bid`: **1.27 ns** (moyenne)
-- `get_best_ask`: **1.26 ns** (moyenne)
-- `get_spread`: **1.10 ns** (moyenne)
-
-**Optimisations compilateur:**
-```toml
-[profile.release]
-opt-level = 3
-lto = "fat"              # Link-Time Optimization
-codegen-units = 1        # Single compilation unit
-panic = "abort"          # Pas d'unwinding
-strip = true             # Strip symbols
-```
-
----
-
-### `triangular_arbitrage.rs` - Détecteur d'Arbitrage
-**Structure:**
-```rust
-pub struct TriangularArbitrageDetector {
-    pub pair1: OrderBookImpl,  // ETH-USDC
-    pub pair2: OrderBookImpl,  // BTC-USDC  
-    pub pair3: OrderBookImpl,  // ETH-BTC
-    
-    trading_fee: f64,          // 0.001 (0.1%)
-    min_profit_bps: f64,       // 2.0 bps (0.02%)
-    
-    // Facteurs de conversion spécifiques
-    pair1_divisor: f64,        // 10,000 (ETH-USDC)
-    pair2_divisor: f64,        // 10,000 (BTC-USDC)
-    pair3_divisor: f64,        // 100,000,000 (ETH-BTC)
-    
-    // Cache des 6 prix pour éviter les appels répétés
-    cached_price1_ask: f64,
-    cached_price1_bid: f64,
-    cached_price2_ask: f64,
-    cached_price2_bid: f64,
-    cached_price3_ask: f64,
-    cached_price3_bid: f64,
-}
-```
-
-**Innovation: Précision Multi-Facteur**
-- Chaque paire utilise son propre facteur de conversion
-- ETH-BTC: précision 8000x meilleure qu'avant (erreur réduite de 0.23% à 0.00003%)
-- Permet de capturer les micro-variations de prix nécessaires pour l'arbitrage HFT
-
-**Méthodes principales:**
-```rust
-// MAJ du cache des prix
-pub fn update_price_cache(&mut self)
-
-// Détection avec orderbooks intégrés (mode backtest)
-pub fn detect_opportunities(
-    &mut self,
-    timestamp: u64,
-    starting_amount: f64,
-) -> Vec<TriangularOpportunity>
-
-// Détection avec références (mode live - non utilisé actuellement)
-pub fn detect_opportunities_with_refs(
-    &mut self,
-    ob1: &OrderBookImpl,
-    ob2: &OrderBookImpl,
-    ob3: &OrderBookImpl,
-    timestamp: u64,
-    starting_amount: f64,
-) -> Vec<TriangularOpportunity>
-```
-
-**Calculs d'arbitrage (Forward & Reverse):**
-```rust
-// Forward: USDC → ETH → BTC → USDC
-// 1. Acheter ETH avec USDC (ask)
-let eth_amount = (usdc / cached_price1_ask) * fee_mult;
-// 2. Vendre ETH pour BTC (bid)
-let btc_amount = (eth_amount * cached_price3_bid) * fee_mult;
-// 3. Vendre BTC pour USDC (bid)
-let final_usdc = (btc_amount * cached_price2_bid) * fee_mult;
-
-// Reverse: USDC → BTC → ETH → USDC
-// 1. Acheter BTC avec USDC (ask)
-let btc_amount = (usdc / cached_price2_ask) * fee_mult;
-// 2. Acheter ETH avec BTC (ask)
-let eth_amount = (btc_amount / cached_price3_ask) * fee_mult;
-// 3. Vendre ETH pour USDC (bid)
-let final_usdc = (eth_amount * cached_price1_bid) * fee_mult;
-```
-
-**Performance:**
-- Détection simple: **0.24 ns**
-- Avec mise à jour cache: **0.61 ns**
-- Cycle complet (update + détection): **3.54 ns** (P50: 0ns!)
-
----
-
-### `arbitrage_benchmark.rs` - Benchmarks Performance Arbitrage
-**Responsabilités:**
-- Mesure de la performance de détection d'arbitrage
-- Tests avec données réalistes ETH-BTC-USDC
-- Analyse de latency (nanoseconds → microseconds → milliseconds)
-
-**Benchmarks:**
-1. **Détection simple** (cache déjà à jour): ~0.24 ns
-2. **Avec mise à jour cache**: ~0.61 ns
-3. **Cycle complet** (update orderbook + détection): ~3.54 ns
-
-**Analyse de latency:**
-```
-Cycle complet: 3.54 ns = 0.004 μs
-+ Network latency: ~10-50 ms
-= Latence totale: ~30 ms (dominée par le réseau)
-```
-
-**Verdict:** Performance de niveau HFT - très difficile à frontrun par d'autres bots!
-
----
-
-### `coinbase_feed.rs` - Connexion WebSocket Coinbase
-**Responsabilités:**
-- Connexion au WebSocket de Coinbase Exchange
-- Souscription au canal `level2_batch` (pas d'authentification requise)
-- Parsing des messages JSON (snapshot + l2update)
-- Application des updates aux orderbooks avec le bon facteur de conversion
-- Détection d'arbitrage régulière
-
-**Structure des messages Coinbase:**
-```json
-// Snapshot initial
-{
-  "type": "snapshot",
-  "product_id": "ETH-USDC",
-  "changes": [
-    ["buy", "3145.50", "10.5"],    // [side, price, size]
-    ["sell", "3147.00", "5.25"]
-  ]
-}
-
-// Updates incrémentales
-{
-  "type": "l2update",
-  "product_id": "ETH-USDC",
-  "changes": [
-    ["buy", "3146.00", "7.5"],     // Nouveau prix ou mise à jour
-    ["sell", "3148.00", "0.0"]     // size=0 → suppression
-  ]
-}
-```
-
-**Conversion des données (multi-précision):**
-```rust
-// ETH-USDC et BTC-USDC: facteur 10,000
-let price = change[1].parse::<f64>().unwrap_or(0.0);
-let price_int = (price * 10000.0) as i64;
-
-// ETH-BTC: facteur 100,000,000 (8 décimales)
-let price = change[1].parse::<f64>().unwrap_or(0.0);
-let price_int = (price * 100000000.0) as i64;
-let quantity = change[2].parse::<f64>().unwrap_or(0.0);
-let qty_micros = (quantity * 1_000_000.0) as u64;
-```
-
-**Optimisation:** Arbitrage vérifié seulement tous les 10 updates pour réduire la contention des locks (3 locks orderbook + 1 lock detector)
-
----
-
-### `benchmarks.rs` - Tests de Performance
-**Méthode:**
-- Calibration du overhead de mesure (~14ns)
-- 100,000 opérations par benchmark
-- Calcul de la médiane (P50)
-- Soustraction de l'overhead
-
-**Tests:**
-```rust
-bench_update()       // Test de apply_update
-bench_best_bid()     // Test de get_best_bid
-bench_best_ask()     // Test de get_best_ask
-```
-
----
-
-### `backtest.rs` - Moteur de Backtest
-**Fonctionnalités:**
-- Charge des données historiques (3 paires)
-- Fusionne les updates chronologiquement
-- Applique les updates aux orderbooks
-- Détecte les opportunités d'arbitrage
-- Calcule le profit total et les statistiques
-
-**Structure:**
-```rust
-pub struct BacktestEngine {
-    detector: TriangularArbitrageDetector,
-    starting_capital: f64,
-}
-
-pub struct BacktestResult {
-    pub total_opportunities: usize,
-    pub total_profit: f64,
-    pub best_opportunity: Option<TriangularOpportunity>,
-    pub avg_profit_per_opportunity: f64,
-    pub total_updates_processed: usize,
-    pub execution_time_ms: u128,
-}
-```
-
-**Note:** Actuellement le backtest utilise des données factices. Il faudra remplacer par des données réelles.
-
----
-
-### `data_loader.rs` - Chargement de Données
-**Structure:**
-```rust
-pub struct HistoricalUpdate {
-    pub timestamp: u64,
-    pub symbol: String,
-    pub update: Update,
-}
-```
-
-**Méthodes:**
-```rust
-pub fn load_from_csv<P: AsRef<Path>>(path: P) -> Result<Vec<HistoricalUpdate>>
-pub fn generate_sample_data(count: usize, symbol: &str) -> Vec<HistoricalUpdate>
-```
-
----
-
-### `reporting.rs` - Génération de Rapports
-**Formats:**
-- Console (avec emojis et formatage)
-- CSV (pour analyse dans Excel/Python)
-
-**Métriques:**
-- Updates processés
-- Opportunités trouvées
-- Profit total et moyen
-- Temps d'exécution
-- Meilleure opportunité
-
----
-
-### `telegram.rs` - Notifications & Contrôle 📱
-**Fonctionnalités:**
-- Envoi de messages via l'API Telegram Bot
-- **Contrôle interactif** via boutons (Start/Stop/Status)
-- Gestion des callbacks et menus de navigation
-- Gestion des erreurs réseau
-- Formatage Markdown des messages
-
-**Structure:**
-```rust
-pub struct TelegramBot {
-    client: reqwest::Client,
-    token: String,
-    chat_id: String,
-}
-```
-
-**Commandes supportées:**
-- `/start` ou `/menu`: Affiche le panneau de contrôle
-- Boutons interactifs: Start, Stop, Status, Menu
-
-**Utilisation:**
-```rust
-let bot = TelegramBot::new().unwrap();
-bot.send_message("🔔 Trade Closed: +$15.00").await?;
-// Lancer le listener pour les commandes
-bot.run_listener(is_running_arc).await;
-```
+### Legacy / Obsolète
+- `triangular_arbitrage.rs`: Logique d'arbitrage HFT (Projet 1).
+- `data_loader.rs`: Chargement de données CSV.
+- `adaptive_backtest.rs`: Ancien backtest adaptatif.
+- `arbitrage_benchmark.rs`: Benchmark spécifique à l'arbitrage.
+- `orderbook.rs`: Implémentation de l'orderbook HFT.
 
 ---
 
@@ -676,12 +319,18 @@ TOTAL (avec réseau)          ~30 ms           100%
 ### 🔐 Environment Variables (.env)
 Le fichier `.env` à la racine du projet doit contenir les clés suivantes :
 ```bash
-# Hyperliquid Private Key (pour signer les transactions)
-PRIVATE_KEY=0x...
+# Hyperliquid Configuration
+HYPERLIQUID_WALLET_ADDRESS=0x...
+HYPERLIQUID_PRIVATE_KEY=0x... (Hex format)
+LIVE_TRADING=true  # true = Mainnet (Real Money), false = Dry Run
 
-# Telegram Bot Configuration (pour les notifications)
+# Telegram Bot Configuration (Notifications & Contrôle)
 TELEGRAM_BOT_TOKEN=123456789:ABCdef...
 TELEGRAM_CHAT_ID=123456789
+
+# Supabase Configuration (Logs & Persistance)
+SUPABASE_URL=https://xyz.supabase.co
+SUPABASE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ```
 
 ### Triangle ETH-BTC-USDC
@@ -1599,8 +1248,8 @@ Le projet utilise Supabase (PostgreSQL) pour la persistance.
 ---
 
 **Dernière mise à jour:** 16 décembre 2025  
-**Version:** 1.3.0  
+**Version:** 1.4.0  
 **Auteur:** alexgd  
 **Statut:** 🟢 LIVE TRADING (Real Money Active)  
 **Stratégie Principale:** 🏆 Adaptive Bidirectional (ADX=20)  
-**Nouvelles Capacités:** Live Trading + Bouton "Positions & PnL" + Warmup H1 📱💰
+**Nouvelles Capacités:** Live Trading + Bouton "Positions & PnL" + Warmup H1 + Supabase Logging + Graceful Shutdown 📱💰🗄️

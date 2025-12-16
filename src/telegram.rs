@@ -54,14 +54,18 @@ impl TelegramBot {
         let url = format!("https://api.telegram.org/bot{}/sendMessage", self.token);
         
         let status_text = if is_running { "🟢 Bot is RUNNING" } else { "🔴 Bot is STOPPED" };
+        let action_btn = if is_running {
+            json!({ "text": "⏹️ Stop Bot", "callback_data": "stop" })
+        } else {
+            json!({ "text": "▶️ Start Bot", "callback_data": "start" })
+        };
         
         let keyboard = json!({
             "inline_keyboard": [[
-                { "text": "▶️ Start", "callback_data": "start" },
-                { "text": "⏹️ Stop", "callback_data": "stop" },
-                { "text": "📊 Status", "callback_data": "status" }
+                action_btn
             ], [
-                { "text": "💰 Positions & PnL", "callback_data": "positions" }
+                { "text": "💰 Positions & Indicators", "callback_data": "positions" },
+                { "text": "📜 Last Logs", "callback_data": "logs" }
             ]]
         });
 
@@ -80,14 +84,18 @@ impl TelegramBot {
         let url = format!("https://api.telegram.org/bot{}/sendMessage", self.token);
         
         let status_text = if is_running { "🟢 Bot is RUNNING" } else { "🔴 Bot is STOPPED" };
+        let action_btn = if is_running {
+            json!({ "text": "⏹️ Stop Bot", "callback_data": "stop" })
+        } else {
+            json!({ "text": "▶️ Start Bot", "callback_data": "start" })
+        };
         
         let keyboard = json!({
             "inline_keyboard": [[
-                { "text": "▶️ Start", "callback_data": "start" },
-                { "text": "⏹️ Stop", "callback_data": "stop" },
-                { "text": "📊 Status", "callback_data": "status" }
+                action_btn
             ], [
-                { "text": "💰 Positions & PnL", "callback_data": "positions" }
+                { "text": "💰 Positions & Indicators", "callback_data": "positions" },
+                { "text": "📜 Last Logs", "callback_data": "logs" }
             ]]
         });
 
@@ -210,10 +218,19 @@ impl TelegramBot {
                                                     _ => "⚪ NONE",
                                                 };
                                                 
-                                                msg.push_str(&format!("*Current Position:*\nState: {}\nEntry: ${:.2}\nSize: {:.4} SOL\nUnrealized PnL: ${:+.2} ({:+.2}%)",
+                                                msg.push_str(&format!("*Current Position:*\nState: {}\nEntry: ${:.2}\nSize: {:.4} SOL\nUnrealized PnL: ${:+.2} ({:+.2}%)\n\n",
                                                     state_str, pos.entry_price, pos.position_size, pos.unrealized_pnl, pos.unrealized_pnl_pct));
                                             } else {
-                                                msg.push_str("*Current Position:* None");
+                                                msg.push_str("*Current Position:* None\n\n");
+                                            }
+
+                                            msg.push_str("*Indicators:*\n");
+                                            msg.push_str(&format!("ADX: {:.2}\n", pm.last_adx));
+                                            msg.push_str(&format!("Regime: {}\n", pm.last_regime));
+                                            if let Some((l, m, u)) = pm.last_bollinger {
+                                                msg.push_str(&format!("Bollinger: L:{:.2} M:{:.2} U:{:.2}", l, m, u));
+                                            } else {
+                                                msg.push_str("Bollinger: N/A");
                                             }
                                             
                                             if let Some(cid) = chat_id {
@@ -222,6 +239,31 @@ impl TelegramBot {
                                                 let _ = self.send_default_message_with_menu_btn(&msg).await;
                                             }
                                             reply_text = "Positions Sent";
+                                        },
+                                        "logs" => {
+                                            let pm = position_manager.lock().await;
+                                            let mut msg = "📜 *Last 5 Logs*\n\n".to_string();
+                                            
+                                            if let Some(client) = &pm.supabase {
+                                                match client.fetch_last_logs(5).await {
+                                                    Ok(logs) => {
+                                                        for log in logs {
+                                                            let time = log.created_at.map(|t| t.format("%H:%M").to_string()).unwrap_or("??:??".to_string());
+                                                            msg.push_str(&format!("`[{}] {}`\n", time, log.message));
+                                                        }
+                                                    },
+                                                    Err(e) => msg.push_str(&format!("Error fetching logs: {}", e)),
+                                                }
+                                            } else {
+                                                msg.push_str("Supabase not connected.");
+                                            }
+
+                                            if let Some(cid) = chat_id {
+                                                let _ = self.send_message_with_menu_btn(cid, &msg).await;
+                                            } else {
+                                                let _ = self.send_default_message_with_menu_btn(&msg).await;
+                                            }
+                                            reply_text = "Logs Sent";
                                         },
                                         "menu" => {
                                             let running = is_running.load(Ordering::SeqCst);

@@ -9,6 +9,8 @@ pub struct DbLog {
     pub level: String,
     pub message: String,
     pub context: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +52,7 @@ impl SupabaseClient {
             level: level.to_string(),
             message: message.to_string(),
             context: context.map(|s| s.to_string()),
+            created_at: None, // Let Supabase handle default
         };
 
         self.client.post(&url)
@@ -61,6 +64,25 @@ impl SupabaseClient {
             .await?;
 
         Ok(())
+    }
+
+    pub async fn fetch_last_logs(&self, limit: usize) -> Result<Vec<DbLog>, Box<dyn Error>> {
+        let url = format!("{}/rest/v1/bot_logs?select=*&order=created_at.desc&limit={}", self.url, limit);
+        
+        let response = self.client.get(&url)
+            .header("apikey", &self.key)
+            .header("Authorization", format!("Bearer {}", self.key))
+            .header("Accept", "application/json")
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await?;
+            return Err(format!("Supabase error: {}", error_text).into());
+        }
+
+        let logs: Vec<DbLog> = response.json().await?;
+        Ok(logs)
     }
 
     pub async fn fetch_open_positions(&self) -> Result<Vec<DbPosition>, Box<dyn Error>> {
