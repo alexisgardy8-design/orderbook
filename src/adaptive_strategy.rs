@@ -401,6 +401,29 @@ impl AdaptiveStrategy {
         }
     }
 
+    /// Vérifie si une condition de sortie est remplie en cours de bougie (Intra-Candle)
+    /// Ne modifie pas l'état des indicateurs, mais peut retourner un Signal de sortie.
+    pub fn check_exit_condition(&self, current_high: f64, _current_low: f64, _current_close: f64) -> Option<Signal> {
+        match self.position_type {
+            PositionType::LongRange => {
+                if let Some((_, middle_band, _)) = self.last_bollinger {
+                    // Si le prix touche la moyenne mobile (Middle Band)
+                    if current_high >= middle_band {
+                        return Some(Signal::SellRange);
+                    }
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Force la sortie de position (utilisé après un signal intra-candle)
+    pub fn force_exit(&mut self) {
+        self.position_type = PositionType::None;
+        self.entry_price = None;
+    }
+
     /// Met à jour la stratégie avec OHLC et retourne un signal
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Signal {
         // 1. Mise à jour des indicateurs
@@ -472,7 +495,8 @@ impl AdaptiveStrategy {
             }
             PositionType::LongRange => {
                 // En position Range: sortie rapide au milieu
-                if close >= middle_band {
+                // CHECK HIGH instead of CLOSE to capture touch
+                if high >= middle_band {
                     self.position_type = PositionType::None;
                     self.entry_price = None;
                     return Signal::SellRange;

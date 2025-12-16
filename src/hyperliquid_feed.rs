@@ -71,7 +71,9 @@ impl HyperliquidFeed {
     fn format_timestamp(ts: u64) -> String {
         let secs = (ts / 1000) as i64;
         if let Some(dt) = chrono::DateTime::from_timestamp(secs, 0) {
-            dt.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+            // Add 1 hour for France Winter Time
+            let dt_paris = dt + chrono::Duration::hours(1);
+            dt_paris.format("%Y-%m-%d %H:%M:%S (Paris)").to_string()
         } else {
             "Invalid timestamp".to_string()
         }
@@ -305,6 +307,18 @@ impl HyperliquidFeed {
         println!("📡 Subscribing to {} candles ({})...", self.coin, self.interval);
         write.send(Message::Text(subscribe_msg.to_string())).await?;
 
+        // S'abonner aux bougies 5m pour le monitoring intra-candle
+        let subscribe_5m_msg = json!({
+            "method": "subscribe",
+            "subscription": {
+                "type": "candle",
+                "coin": self.coin,
+                "interval": "5m"
+            }
+        });
+        println!("📡 Subscribing to {} candles (5m) for intra-candle monitoring...", self.coin);
+        write.send(Message::Text(subscribe_5m_msg.to_string())).await?;
+
         // Traiter les messages entrants
         let mut message_count = 0;
         let mut candle_count = 0;
@@ -391,8 +405,12 @@ impl HyperliquidFeed {
                                             // Parser les bougies
                                             if let Ok(candles) = serde_json::from_value::<Vec<HyperCandle>>(ws_msg.data) {
                                                 for candle in candles {
-                                                    candle_count += 1;
-                                                    self.process_candle(candle, candle_count, false).await;
+                                                    if candle.i == self.interval {
+                                                        candle_count += 1;
+                                                        self.process_candle(candle, candle_count, false).await;
+                                                    } else if candle.i == "5m" {
+                                                        self.process_5m_candle(candle).await;
+                                                    }
                                                 }
                                             }
                                         }
@@ -503,6 +521,30 @@ impl HyperliquidFeed {
         }
     }
 
+    /// Traite une bougie 5m pour vérifier les conditions de sortie intra-candle
+    async fn process_5m_candle(&mut self, candle: HyperCandle) {
+        // On ne fait rien si aucune position n'est ouverte
+        if self.strategy.get_position_type() == crate::adaptive_strategy::PositionType::None {
+            return;
+        }
+
+        // On vérifie si le timestamp de la bougie 5m est plus récent que la dernière bougie traitée
+        // pour éviter de traiter des vieilles données, mais on veut surtout le High/Low actuel
+        
+        // Check exit condition using the 5m candle High/Low
+        if let Some(signal) = self.strategy.check_exit_condition(candle.h, candle.l, candle.c) {
+            println!("\n⚡ INTRA-CANDLE EXIT TRIGGERED (5m Candle)!");
+            println!("   Time: {} (Paris)", Self::format_timestamp(candle.t));
+            println!("   Price hit target: High ${:.2} / Low ${:.2}", candle.h, candle.l);
+            
+            // Force exit in strategy state
+            self.strategy.force_exit();
+            
+            // Execute signal immediately
+            self.handle_trading_signal(signal, candle.c, candle.t).await;
+        }
+    }
+
     /// Traite une bougie reçue et génère des signaux UNIQUEMENT à la clôture
     pub async fn process_candle(&mut self, candle: HyperCandle, count: usize, force_close: bool) {
         let last_candle_time = self.candle_buffer.back().map(|c| c.t);
@@ -540,6 +582,19 @@ impl HyperliquidFeed {
                 print!("\r⏳ Candle Update: ${:.2} (H: {:.2} L: {:.2})", candle.c, candle.h, candle.l);
                 use std::io::Write;
                 std::io::stdout().flush().unwrap();
+
+                // ⚡ INTRA-CANDLE EXIT CHECK
+                // Check if we hit the target (Middle Band) during this candle
+                if let Some(signal) = self.strategy.check_exit_condition(candle.h, candle.l, candle.c) {
+                    println!("\n\n⚡ INTRA-CANDLE EXIT TRIGGERED!");
+                    println!("   Price hit target: High ${:.2}", candle.h);
+                    
+                    // Force exit in strategy state
+                    self.strategy.force_exit();
+                    
+                    // Execute signal immediately
+                    self.handle_trading_signal(signal, candle.c, candle.t).await;
+                }
                 
             } else if candle.t > last_t {
                 // 🏁 CLÔTURE: Une nouvelle bougie commence, la précédente est terminée

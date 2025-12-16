@@ -253,7 +253,9 @@ impl HyperliquidHistoricalData {
     fn format_timestamp(millis: u64) -> String {
         use chrono::prelude::*;
         let dt = Utc.timestamp_millis_opt(millis as i64).unwrap();
-        dt.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+        // Add 1 hour for France Winter Time
+        let dt_paris = dt + chrono::Duration::hours(1);
+        dt_paris.format("%Y-%m-%d %H:%M:%S (Paris)").to_string()
     }
 }
 

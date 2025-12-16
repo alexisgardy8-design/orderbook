@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use reqwest::Client;
 use std::env;
 use std::error::Error;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Utc, Duration};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DbLog {
@@ -48,11 +48,16 @@ impl SupabaseClient {
 
     pub async fn log(&self, level: &str, message: &str, context: Option<&str>) -> Result<(), Box<dyn Error>> {
         let url = format!("{}/rest/v1/bot_logs", self.url);
+        
+        // Adjust time to France (UTC+1) manually since server is UTC
+        let now = Utc::now();
+        let adjusted_time = now + Duration::hours(1);
+
         let log_entry = DbLog {
             level: level.to_string(),
             message: message.to_string(),
             context: context.map(|s| s.to_string()),
-            created_at: None, // Let Supabase handle default
+            created_at: Some(adjusted_time),
         };
 
         self.client.post(&url)

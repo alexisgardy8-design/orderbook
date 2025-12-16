@@ -13,6 +13,10 @@ pub struct BankrollInfo {
     pub available_balance: f64,
     /// Pourcentage de risque par trade (défaut 2%)
     pub risk_percentage: f64,
+    /// Effet de levier (ex: 5.0)
+    pub leverage: f64,
+    /// Allocation du capital par trade (ex: 0.20 pour 20%)
+    pub allocation_pct: f64,
 }
 
 impl BankrollInfo {
@@ -20,19 +24,20 @@ impl BankrollInfo {
         Self {
             total_balance,
             available_balance: total_balance,
-            risk_percentage: 1.0, // 1% risk per trade (Target: 100% Position Size with 1% SL)
+            risk_percentage: 1.0, 
+            leverage: 5.0,      // Levier x5 demandé
+            allocation_pct: 0.20, // 20% de la bankroll par position
         }
     }
 
-    /// Calcule la taille de position optimale basée sur le stop loss
-    /// position_size = (bankroll * risk_pct) / (stop_loss_distance_pct)
-    pub fn calculate_position_size(&self, stop_loss_pct: f64) -> f64 {
-        if stop_loss_pct <= 0.0 {
-            return 0.0;
-        }
+    /// Calcule la taille de position (Valeur Notionnelle)
+    /// Stratégie: 20% de la Bankroll * Levier 5
+    pub fn calculate_position_size(&self, _stop_loss_pct: f64) -> f64 {
+        // Marge allouée = Bankroll * 20%
+        let margin_allocated = self.total_balance * self.allocation_pct;
         
-        let risk_amount = self.available_balance * (self.risk_percentage / 100.0);
-        let position_value = risk_amount / (stop_loss_pct / 100.0);
+        // Valeur de la position = Marge * Levier
+        let position_value = margin_allocated * self.leverage;
         
         position_value
     }
@@ -350,24 +355,22 @@ impl PositionManager {
             position_value = 10.0;
         }
 
-        // 2. Max Leverage 1x (sauf si on a forcé à $10)
-        if position_value > self.bankroll.available_balance {
-            if position_value == 10.0 {
-                println!("⚠️ Utilisation de levier pour atteindre le minimum de $10 (Balance: ${:.2})", self.bankroll.available_balance);
-            } else {
-                println!("⚠️ Position (${:.2}) > Balance. Limitation à 1x levier (${:.2})", position_value, self.bankroll.available_balance);
-                position_value = self.bankroll.available_balance;
-            }
+        // 2. Vérification du solde disponible (Marge)
+        let margin_required = position_value / self.bankroll.leverage;
+        if margin_required > self.bankroll.available_balance {
+             println!("⚠️ Marge requise (${:.2}) > Balance (${:.2}). Ajustement...", margin_required, self.bankroll.available_balance);
+             // On réduit la position pour qu'elle rentre dans la marge dispo
+             position_value = self.bankroll.available_balance * self.bankroll.leverage;
         }
 
         let position_size = position_value / entry_price;
 
         let position = OpenPosition::new_long(entry_price, entry_time, position_size, stop_loss_price);
         
-        // On ne déduit pas plus que ce qu'on a (si levier, on utilise tout le collatéral)
-        let cost = f64::min(position.position_value, self.bankroll.available_balance);
+        // Déduction de la marge utilisée
+        let margin_cost = position.position_value / self.bankroll.leverage;
         self.bankroll.update_available_balance(
-            self.bankroll.available_balance - cost
+            self.bankroll.available_balance - margin_cost
         );
         
         self.position = Some(position.clone());
@@ -395,24 +398,21 @@ impl PositionManager {
             position_value = 10.0;
         }
 
-        // 2. Max Leverage 1x (sauf si on a forcé à $10)
-        if position_value > self.bankroll.available_balance {
-            if position_value == 10.0 {
-                println!("⚠️ Utilisation de levier pour atteindre le minimum de $10 (Balance: ${:.2})", self.bankroll.available_balance);
-            } else {
-                println!("⚠️ Position (${:.2}) > Balance. Limitation à 1x levier (${:.2})", position_value, self.bankroll.available_balance);
-                position_value = self.bankroll.available_balance;
-            }
+        // 2. Vérification du solde disponible (Marge)
+        let margin_required = position_value / self.bankroll.leverage;
+        if margin_required > self.bankroll.available_balance {
+             println!("⚠️ Marge requise (${:.2}) > Balance (${:.2}). Ajustement...", margin_required, self.bankroll.available_balance);
+             position_value = self.bankroll.available_balance * self.bankroll.leverage;
         }
 
         let position_size = position_value / entry_price;
 
         let position = OpenPosition::new_short(entry_price, entry_time, position_size, stop_loss_price);
         
-        // On ne déduit pas plus que ce qu'on a (si levier, on utilise tout le collatéral)
-        let cost = f64::min(position.position_value, self.bankroll.available_balance);
+        // Déduction de la marge utilisée
+        let margin_cost = position.position_value / self.bankroll.leverage;
         self.bankroll.update_available_balance(
-            self.bankroll.available_balance - cost
+            self.bankroll.available_balance - margin_cost
         );
         
         self.position = Some(position.clone());
