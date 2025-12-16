@@ -19,7 +19,7 @@ impl BankrollInfo {
         Self {
             total_balance,
             available_balance: total_balance,
-            risk_percentage: 2.0, // 2% max loss par trade
+            risk_percentage: 1.0, // 1% risk per trade (Target: 100% Position Size with 1% SL)
         }
     }
 
@@ -63,6 +63,7 @@ pub struct OpenPosition {
     pub take_profit_price: Option<f64>, // TP optionnel
     pub unrealized_pnl: f64,          // P&L non réalisé
     pub unrealized_pnl_pct: f64,      // P&L % non réalisé
+    pub entry_fee: f64,               // Frais d'entrée réels
 }
 
 impl OpenPosition {
@@ -86,6 +87,7 @@ impl OpenPosition {
             take_profit_price: None,
             unrealized_pnl: 0.0,
             unrealized_pnl_pct: 0.0,
+            entry_fee: 0.0,
         }
     }
 
@@ -109,6 +111,7 @@ impl OpenPosition {
             take_profit_price: None,
             unrealized_pnl: 0.0,
             unrealized_pnl_pct: 0.0,
+            entry_fee: 0.0,
         }
     }
 
@@ -196,18 +199,33 @@ impl PositionManager {
             return None;
         }
 
-        let position_size = self.bankroll.calculate_position_size(
-            ((entry_price - stop_loss_price) / entry_price) * 100.0
-        ) / entry_price;
+        let stop_loss_pct = ((entry_price - stop_loss_price) / entry_price) * 100.0;
+        let mut position_value = self.bankroll.calculate_position_size(stop_loss_pct);
 
-        if position_size <= 0.0 || position_size * entry_price > self.bankroll.available_balance {
-            eprintln!("❌ Position trop grande pour la bankroll disponible");
-            return None;
+        // 1. Minimum Order Value ($10)
+        if position_value < 10.0 {
+            println!("⚠️ Position calculée (${:.2}) < $10. Ajustement à $10.", position_value);
+            position_value = 10.0;
         }
 
+        // 2. Max Leverage 1x (sauf si on a forcé à $10)
+        if position_value > self.bankroll.available_balance {
+            if position_value == 10.0 {
+                println!("⚠️ Utilisation de levier pour atteindre le minimum de $10 (Balance: ${:.2})", self.bankroll.available_balance);
+            } else {
+                println!("⚠️ Position (${:.2}) > Balance. Limitation à 1x levier (${:.2})", position_value, self.bankroll.available_balance);
+                position_value = self.bankroll.available_balance;
+            }
+        }
+
+        let position_size = position_value / entry_price;
+
         let position = OpenPosition::new_long(entry_price, entry_time, position_size, stop_loss_price);
+        
+        // On ne déduit pas plus que ce qu'on a (si levier, on utilise tout le collatéral)
+        let cost = f64::min(position.position_value, self.bankroll.available_balance);
         self.bankroll.update_available_balance(
-            self.bankroll.available_balance - position.position_value
+            self.bankroll.available_balance - cost
         );
         
         self.position = Some(position.clone());
@@ -226,18 +244,33 @@ impl PositionManager {
             return None;
         }
 
-        let position_size = self.bankroll.calculate_position_size(
-            ((stop_loss_price - entry_price) / entry_price) * 100.0
-        ) / entry_price;
+        let stop_loss_pct = ((stop_loss_price - entry_price) / entry_price) * 100.0;
+        let mut position_value = self.bankroll.calculate_position_size(stop_loss_pct);
 
-        if position_size <= 0.0 || position_size * entry_price > self.bankroll.available_balance {
-            eprintln!("❌ Position trop grande pour la bankroll disponible");
-            return None;
+        // 1. Minimum Order Value ($10)
+        if position_value < 10.0 {
+            println!("⚠️ Position calculée (${:.2}) < $10. Ajustement à $10.", position_value);
+            position_value = 10.0;
         }
 
+        // 2. Max Leverage 1x (sauf si on a forcé à $10)
+        if position_value > self.bankroll.available_balance {
+            if position_value == 10.0 {
+                println!("⚠️ Utilisation de levier pour atteindre le minimum de $10 (Balance: ${:.2})", self.bankroll.available_balance);
+            } else {
+                println!("⚠️ Position (${:.2}) > Balance. Limitation à 1x levier (${:.2})", position_value, self.bankroll.available_balance);
+                position_value = self.bankroll.available_balance;
+            }
+        }
+
+        let position_size = position_value / entry_price;
+
         let position = OpenPosition::new_short(entry_price, entry_time, position_size, stop_loss_price);
+        
+        // On ne déduit pas plus que ce qu'on a (si levier, on utilise tout le collatéral)
+        let cost = f64::min(position.position_value, self.bankroll.available_balance);
         self.bankroll.update_available_balance(
-            self.bankroll.available_balance - position.position_value
+            self.bankroll.available_balance - cost
         );
         
         self.position = Some(position.clone());

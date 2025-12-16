@@ -30,6 +30,9 @@ mod test_sl_order;
 mod test_market_cycle;
 
 #[cfg(feature = "websocket")]
+mod test_real_pnl;
+
+#[cfg(feature = "websocket")]
 mod hyperliquid_trade;
 
 // Legacy modules (kept for reference but not used)
@@ -75,15 +78,41 @@ fn main() {
                 });
             }
             #[cfg(feature = "websocket")]
+            "test-pnl" => {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async {
+                    if let Err(e) = test_real_pnl::run_test_pnl().await {
+                        eprintln!("❌ Test PnL error: {}", e);
+                    }
+                });
+            }
+            #[cfg(feature = "websocket")]
             "test-telegram" => {
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 rt.block_on(async {
                     println!("🤖 Testing Telegram Bot...");
                     if let Some(bot) = telegram::TelegramBot::new() {
+                        println!("✅ Telegram Bot configured.");
+                        
+                        // 1. Send simple message
                         match bot.send_message("🔔 *Test Notification*\n\nCeci est un test du bot de trading Rust.").await {
                             Ok(_) => println!("✅ Message sent successfully! Check your Telegram."),
                             Err(e) => eprintln!("❌ Failed to send message: {}", e),
                         }
+
+                        // 2. Send Control Keyboard
+                        println!("⌨️  Sending Control Keyboard...");
+                        match bot.send_control_keyboard(true).await {
+                            Ok(_) => println!("✅ Control Keyboard sent! Check your Telegram."),
+                            Err(e) => eprintln!("❌ Failed to send keyboard: {}", e),
+                        }
+
+                        // 3. Start Listener for interaction
+                        println!("👂 Starting Listener for button clicks (Press Ctrl+C to stop)...");
+                        let is_running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+                        let position_manager = std::sync::Arc::new(tokio::sync::Mutex::new(position_manager::PositionManager::new(1000.0)));
+                        bot.run_listener(is_running, position_manager).await;
+
                     } else {
                         eprintln!("❌ Telegram Bot not configured. Check .env file.");
                     }

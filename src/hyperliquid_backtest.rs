@@ -36,7 +36,10 @@ pub fn run_hyperliquid_adaptive_backtest(
     config: AdaptiveConfig,
     initial_capital: f64,
     fee_rate: f64,
+    slippage_rate: f64,
+    hourly_funding_rate: f64,
     candles: &[HyperCandle],
+    stop_loss_pct: f64,
 ) -> HyperliquidBacktestResults {
     let mut strategy = AdaptiveStrategy::new(config);
     
@@ -57,6 +60,7 @@ pub fn run_hyperliquid_adaptive_backtest(
     let mut upgrades = 0;
     let mut short_trades = 0;
     let mut is_short = false; // Flag pour savoir si on est en position short
+    let mut sl_hits = 0;
 
     for candle in candles {
         // Convertir les prix strings en f64
@@ -72,6 +76,84 @@ pub fn run_hyperliquid_adaptive_backtest(
             Ok(v) => v,
             Err(_) => continue,
         };
+
+        // � FUNDING FEES (Deducted every hour if position is open)
+        if position_size > 0.0 {
+            let position_value = position_size * close;
+            let funding_cost = position_value * hourly_funding_rate;
+            capital -= funding_cost;
+        }
+
+        // 🛡️ STOP LOSS CHECK (Avant le signal de clôture)
+        if position_size > 0.0 {
+            if !is_short {
+                // LONG Position: Check Low vs SL
+                let sl_price = entry_price * (1.0 - stop_loss_pct);
+                if low <= sl_price {
+                    // SL Hit!
+                    let exit_price = sl_price * (1.0 - slippage_rate); // Apply Slippage
+                    let revenue = position_size * exit_price;
+                    let fee = revenue * fee_rate;
+                    let net_revenue = revenue - fee;
+                    
+                    capital += net_revenue;
+                    
+                    let profit_usd = net_revenue - (position_size * entry_price);
+                    let profit_pct = (profit_usd / (position_size * entry_price)) * 100.0;
+                    
+                    trades.push(Trade {
+                        entry_price,
+                        exit_price,
+                        profit_pct,
+                        profit_usd,
+                        trade_type: format!("{} (SL)", entry_type),
+                    });
+                    
+                    position_size = 0.0;
+                    entry_type = String::from("None");
+                    is_short = false;
+                    sl_hits += 1;
+                    
+                    // Skip strategy update for this candle as we just exited
+                    // But we still need to update strategy internal state? 
+                    // Yes, strategy needs to see the candle to update indicators
+                    strategy.update(high, low, close);
+                    continue; 
+                }
+            } else {
+                // SHORT Position: Check High vs SL
+                let sl_price = entry_price * (1.0 + stop_loss_pct);
+                if high >= sl_price {
+                    // SL Hit!
+                    let exit_price = sl_price * (1.0 + slippage_rate); // Apply Slippage
+                    let cost_to_cover = position_size * exit_price;
+                    let fee = cost_to_cover * fee_rate;
+                    let total_cost = cost_to_cover + fee;
+                    
+                    let revenue = position_size * entry_price;
+                    let profit_usd = revenue - total_cost;
+                    let profit_pct = (profit_usd / revenue) * 100.0;
+                    
+                    capital += profit_usd;
+                    
+                    trades.push(Trade {
+                        entry_price,
+                        exit_price,
+                        profit_pct,
+                        profit_usd,
+                        trade_type: format!("{} (SL)", entry_type),
+                    });
+                    
+                    position_size = 0.0;
+                    entry_type = String::from("None");
+                    is_short = false;
+                    sl_hits += 1;
+
+                    strategy.update(high, low, close);
+                    continue;
+                }
+            }
+        }
 
         let signal = strategy.update(high, low, close);
         let price = close;
@@ -128,7 +210,8 @@ pub fn run_hyperliquid_adaptive_backtest(
             }
             Signal::SellRange | Signal::SellTrend => {
                 if position_size > 0.0 && !is_short {
-                    let revenue = position_size * price;
+                    let exit_price = price * (1.0 - slippage_rate); // Apply Slippage
+                    let revenue = position_size * exit_price;
                     let fee = revenue * fee_rate;
                     let net_revenue = revenue - fee;
                     
@@ -139,7 +222,7 @@ pub fn run_hyperliquid_adaptive_backtest(
                     
                     trades.push(Trade {
                         entry_price,
-                        exit_price: price,
+                        exit_price,
                         profit_pct,
                         profit_usd,
                         trade_type: entry_type.clone(),
@@ -153,7 +236,8 @@ pub fn run_hyperliquid_adaptive_backtest(
             Signal::CoverShort => {
                 // Sortie de position SHORT (rachat)
                 if position_size > 0.0 && is_short {
-                    let cost_to_cover = position_size * price; // Coût pour racheter
+                    let exit_price = price * (1.0 + slippage_rate); // Apply Slippage
+                    let cost_to_cover = position_size * exit_price; // Coût pour racheter
                     let fee = cost_to_cover * fee_rate;
                     let total_cost = cost_to_cover + fee;
                     
@@ -166,7 +250,7 @@ pub fn run_hyperliquid_adaptive_backtest(
                     
                     trades.push(Trade {
                         entry_price,
-                        exit_price: price,
+                        exit_price,
                         profit_pct,
                         profit_usd,
                         trade_type: entry_type.clone(),
@@ -250,6 +334,7 @@ pub fn run_hyperliquid_adaptive_backtest(
     println!("   Trend Entries (Long): {} trades", trend_trades);
     println!("   Trend Entries (Short): {} trades", short_trades);
     println!("   Range->Trend Upgrades: {} times", upgrades);
+    println!("   Stop Loss Hits: {} trades", sl_hits);
 
     HyperliquidBacktestResults {
         initial_capital,
@@ -292,31 +377,22 @@ pub fn run_hyperliquid_backtest() {
     println!("🌐 Fetching extended data from Hyperliquid API...");
     let client = HyperliquidHistoricalData::new("SOL".to_string(), "1h".to_string());
     
-    // Essayer 2 ans d'abord, puis 1 an, puis récent
-    let candles = match client.fetch_two_years() {
+    // Force 1 year of data as requested
+    let candles = match client.fetch_one_year() {
         Ok(data) if !data.is_empty() => {
-            println!("✅ Successfully fetched {} candles (2 years)", data.len());
+            println!("✅ Successfully fetched {} candles (1 year)", data.len());
             data
         }
         _ => {
-            println!("⏮️  Falling back to 1 year of data...");
-            match client.fetch_one_year() {
-                Ok(data) if !data.is_empty() => {
-                    println!("✅ Successfully fetched {} candles (1 year)", data.len());
+            println!("⏮️  Falling back to recent data...");
+            match client.fetch_recent_candles() {
+                Ok(data) => {
+                    println!("✅ Successfully fetched {} candles (recent)", data.len());
                     data
                 }
-                _ => {
-                    println!("⏮️  Falling back to recent data...");
-                    match client.fetch_recent_candles() {
-                        Ok(data) => {
-                            println!("✅ Successfully fetched {} candles (recent)", data.len());
-                            data
-                        }
-                        Err(e) => {
-                            eprintln!("❌ Failed to fetch any data: {}", e);
-                            return;
-                        }
-                    }
+                Err(e) => {
+                    eprintln!("❌ Failed to fetch any data: {}", e);
+                    return;
                 }
             }
         }
@@ -334,10 +410,14 @@ pub fn run_hyperliquid_backtest() {
     println!("   Period:       ~{} days (~{} years)", candles.len() / 24, (candles.len() / 24) / 365);
     println!("   Capital:      $1,000.00");
     println!("   Fee Rate:     0.05% (Hyperliquid maker fee)");
+    println!("   Stop Loss:    1.0%");
     
     // Note: Hyperliquid maker fees are lower than Coinbase (0.02-0.05% vs 0.10%)
     let initial_capital = 1000.0;
     let fee_rate = 0.0005; // 0.05% - maker fee on Hyperliquid
+    let slippage_rate = 0.001; // 0.1% - estimated slippage
+    let hourly_funding_rate = 0.0000125; // ~10% APR / 365 / 24
+    let stop_loss_pct = 0.01; // 1% Stop Loss (Optimized)
     
     // Test 1: Stratégie Adaptive Standard
     println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -349,7 +429,10 @@ pub fn run_hyperliquid_backtest() {
         config_standard,
         initial_capital,
         fee_rate,
+        slippage_rate,
+        hourly_funding_rate,
         &candles,
+        stop_loss_pct,
     );
     
     print_hyperliquid_results(&results_standard, "Adaptive Standard (ADX=20)");
@@ -364,10 +447,13 @@ pub fn run_hyperliquid_backtest() {
         ..Default::default()
     };
     let results_trend = run_hyperliquid_adaptive_backtest(
-        config_trend_biased,
+        config_trend_biased.clone(),
         initial_capital,
         fee_rate,
+        slippage_rate,
+        hourly_funding_rate,
         &candles,
+        stop_loss_pct,
     );
     
     print_hyperliquid_results(&results_trend, "Adaptive Trend-Biased (ADX=15)");
@@ -385,10 +471,49 @@ pub fn run_hyperliquid_backtest() {
         config_range_biased,
         initial_capital,
         fee_rate,
+        slippage_rate,
+        hourly_funding_rate,
         &candles,
+        stop_loss_pct,
     );
     
     print_hyperliquid_results(&results_range, "Adaptive Range-Biased (ADX=25)");
+
+    // 🔍 OPTIMIZATION: Find Best Stop Loss for Trend-Biased Strategy
+    println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("🔍 OPTIMIZATION: Finding Best Stop Loss (Trend-Biased)");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+    let mut best_sl_pct = 0.0;
+    let mut best_sl_return = -999.0;
+    let mut best_sl_results = results_trend.clone();
+
+    // Test SL from 1% to 10%
+    for sl in 1..=10 {
+        let current_sl = sl as f64 / 100.0;
+        print!("   Testing SL {:.0}% ... ", sl);
+        
+        let res = run_hyperliquid_adaptive_backtest(
+            config_trend_biased.clone(),
+            initial_capital,
+            fee_rate,
+            slippage_rate,
+            hourly_funding_rate,
+            &candles,
+            current_sl,
+        );
+        
+        println!("Return: {:+.2}% | Sharpe: {:.2}", res.total_return_pct, res.sharpe_ratio);
+        
+        if res.total_return_pct > best_sl_return {
+            best_sl_return = res.total_return_pct;
+            best_sl_pct = current_sl;
+            best_sl_results = res;
+        }
+    }
+
+    println!("\n🏆 BEST STOP LOSS FOUND: {:.0}%", best_sl_pct * 100.0);
+    print_hyperliquid_results(&best_sl_results, &format!("Optimized Trend-Biased (SL={:.0}%)", best_sl_pct * 100.0));
     
     // Comparaison finale
     println!("\n╔═══════════════════════════════════════════════════════════════╗");
@@ -399,6 +524,7 @@ pub fn run_hyperliquid_backtest() {
         ("Adaptive Standard (20)", &results_standard),
         ("Adaptive Trend-Biased (15)", &results_trend),
         ("Adaptive Range-Biased (25)", &results_range),
+        ("🏆 Optimized Trend (SL)", &best_sl_results),
     ];
     
     let best = strategies

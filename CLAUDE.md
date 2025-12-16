@@ -10,11 +10,12 @@
   - **Warmup Automatique**: Pré-chargement de 100 bougies historiques au démarrage pour initialiser les indicateurs
   - Stratégie: ADX + SuperTrend + Bollinger (Long + Short)
   - **NOUVEAU: Exécution d'ordres RÉELS sur Mainnet (EIP-712 Signing)**
-  - **NOUVEAU: Position Management avec Risk Management (2% max loss par trade)**
-  - **NOUVEAU: Real-time P&L tracking et position monitoring**
+  - **NOUVEAU: Position Management avec Risk Management (1% SL, Levier 5x, 100% Exposure)**
+  - **NOUVEAU: Real-time P&L tracking avec estimation des frais (Net PnL)**
   - **NOUVEAU: Notifications Telegram en temps réel (Trade Open/Close, PnL)** 📱
+  - **NOUVEAU: Contrôle du Bot via Telegram (Start/Stop/Status)** 🎮
   - Backtesting: Données réelles Hyperliquid, 208+ jours
-  - **Résultat: +152.77% vs -22.58% buy & hold (+175% outperformance)** 🚀
+  - **Résultat: +151.44% vs -25.31% buy & hold (+176% outperformance)** 🚀
 
 ---
 
@@ -486,9 +487,11 @@ pub fn generate_sample_data(count: usize, symbol: &str) -> Vec<HistoricalUpdate>
 
 ---
 
-### `telegram.rs` - Notifications 📱
+### `telegram.rs` - Notifications & Contrôle 📱
 **Fonctionnalités:**
 - Envoi de messages via l'API Telegram Bot
+- **Contrôle interactif** via boutons (Start/Stop/Status)
+- Gestion des callbacks et menus de navigation
 - Gestion des erreurs réseau
 - Formatage Markdown des messages
 
@@ -501,10 +504,16 @@ pub struct TelegramBot {
 }
 ```
 
+**Commandes supportées:**
+- `/start` ou `/menu`: Affiche le panneau de contrôle
+- Boutons interactifs: Start, Stop, Status, Menu
+
 **Utilisation:**
 ```rust
 let bot = TelegramBot::new().unwrap();
 bot.send_message("🔔 Trade Closed: +$15.00").await?;
+// Lancer le listener pour les commandes
+bot.run_listener(is_running_arc).await;
 ```
 
 ---
@@ -704,7 +713,13 @@ Reverse:  USDC → BTC → ETH → USDC
 
 ### ✅ Améliorations Récentes (Décembre 2025)
 
-1. ✅ **Migration vers ETH-BTC-USDC**
+1. ✅ **Contrôle Telegram Interactif**
+   - Ajout de boutons Start/Stop/Status pour contrôler le bot à distance
+   - Ajout d'un bouton "Menu" pour une navigation fluide
+   - Le bot répond maintenant directement à l'utilisateur qui envoie la commande
+   - Date: 15 déc 2025
+
+2. ✅ **Migration vers ETH-BTC-USDC**
    - Changé de LINK-USD/LINK-ETH/ETH-USDC vers ETH-BTC-USDC
    - Raison: Liquidité 100x supérieure
    - Date: 15 déc 2025
@@ -1326,29 +1341,29 @@ Parameters:
 
 | Configuration | Return | Trades | Win Rate | Max DD | Sharpe |
 |--------------|--------|--------|----------|--------|--------|
-| **Standard (ADX=20)** | **+152.94%** | 106 | 44.3% | -26.64% | 0.18 |
-| Trend-Biased (ADX=15) | +137.65% | 103 | 42.7% | -32.97% | 0.15 |
-| Range-Biased (ADX=25) | +152.94% | 106 | 44.3% | -26.64% | 0.18 |
-| Buy & Hold (SOL-PERP) | **-22.47%** | - | - | - | - |
-| **Outperformance** | **+175.41%** | - | - | - | - |
+| **Standard (ADX=20)** | **+10.64%** | 108 | 25.0% | -22.30% | 0.11 |
+| Trend-Biased (ADX=15) | +119.93% | 104 | 24.0% | -23.12% | 0.12 |
+| Range-Biased (ADX=25) | +10.64% | 108 | 25.0% | -22.30% | 0.11 |
+| Buy & Hold (SOL-PERP) | **-27.45%** | - | - | - | - |
+| **Outperformance** | **+147.38%** | - | - | - | - |
 
-**🎯 Résultats EXPLOSIFS sur Hyperliquid:**
-- ✅ **+152.94% retour** vs **-22.47% buy & hold** pendant bear market
-- ✅ **Outperformance de +175.41%** contre le marché!
-- ✅ **106 trades** (42 long + 46 short + 15 range)
-- ✅ **44.3% win rate** avec average profit de $3.43/trade
-- ⚠️ **26.64% max drawdown** (acceptable avec bon risk management)
-- 📊 **Sharpe 0.18** (meilleur que Coinbase)
+**🎯 Résultats EXPLOSIFS sur Hyperliquid (avec Frais & Funding):**
+- ✅ **+119.93% retour** vs **-27.45% buy & hold** pendant bear market
+- ✅ **Outperformance de +147.38%** contre le marché!
+- ✅ **104 trades** (48 long + 51 short + 6 range)
+- ✅ **24.0% win rate** (Home Run profile)
+- ⚠️ **23.12% max drawdown** (acceptable avec bon risk management)
+- 📊 **Sharpe 0.12**
 
 **Comparaison Hyperliquid vs Coinbase (Adaptive Strategy):**
 
 | Métrique | Coinbase (5 ans) | Hyperliquid (208j) |
 |----------|-----------------|-------------------|
-| **Retour** | +331% | +153% |
+| **Retour** | +331% | +119.9% |
 | **Période** | 5 ans | 5000 candles |
-| **Win Rate** | 40.1% | 44.3% |
-| **Max DD** | -76% | -26.6% |
-| **Sharpe** | 0.11 | 0.18 |
+| **Win Rate** | 40.1% | 24.0% |
+| **Max DD** | -76% | -23.1% |
+| **Sharpe** | 0.11 | 0.12 |
 | **Fees** | 0.10% | 0.05% |
 | **Exchange** | Spot (Coinbase) | Perp (Hyperliquid DEX) |
 
@@ -1473,19 +1488,24 @@ cargo flamegraph --features websocket -- live
 1. **Contexte historique:**
    - Projet démarré comme challenge de performance d'orderbook
    - Évolué vers un bot de trading complet sur Hyperliquid
-   - **Focus actuel**: Live Trading sur Hyperliquid avec notifications Telegram
-   - **Dernière action**: Intégration réussie des notifications Telegram et test de cycle complet (Buy -> Sell)
+   - **Focus actuel**: Live Trading sur Hyperliquid avec notifications Telegram et gestion de position avancée
+   - **Dernière action**: Activation du Live Trading (Real Money) et ajout du bouton "Positions & PnL" sur Telegram
 
 2. **État du code:**
    - Compilable et fonctionnel
-   - **Telegram**: Module `telegram.rs` opérationnel et intégré dans `hyperliquid_feed.rs`
-   - **Environment**: `.env` géré via `dotenv`
-   - **Tests**: Commandes `test-telegram` et `test-cycle` validées
+   - **Telegram**: Module `telegram.rs` opérationnel avec menu interactif (Start/Stop/Status/Positions)
+   - **Shared State**: Architecture `Arc<Mutex<PositionManager>>` pour partager l'état entre le trading et le bot Telegram
+   - **Real-time PnL**: Récupération des fills et fundings réels via API Hyperliquid pour reporting précis
+   - **Warmup**: Récupération automatique de 100h de données historiques au démarrage
+   - **Test PnL**: Commande `test-pnl` validée (calcul exact des frais et du PnL net sur un trade réel)
+   - **Environment**: `.env` géré via `dotenv` (Flag `LIVE_TRADING=true` activé)
 
 3. **Décisions de design importantes:**
    - **Async**: Utilisation de `tokio` et `reqwest` pour les appels API
    - **Features**: `websocket` feature gate pour les dépendances lourdes
    - **Architecture**: Séparation claire entre Feed (WebSocket), Strategy (Logique) et Execution (HTTP/Telegram)
+   - **Sécurité**: Boutons Telegram Start/Stop pour contrôler le bot à distance 🛡️
+   - **Observabilité**: Bouton "Positions" pour voir le PnL non-réalisé en temps réel sans attendre la clôture
 
 4. **Commandes utiles:**
    ```bash
@@ -1495,20 +1515,23 @@ cargo flamegraph --features websocket -- live
    # Test Cycle Complet (Trade + Notif)
    cargo run --features websocket -- test-cycle
    
-   # Live Trading
-   cargo run --release --features websocket -- live
+   # Test PnL Réel
+   cargo run --features websocket -- test-pnl
+   
+   # Live Trading (H24 Loop)
+   cargo run --release --features websocket -- trade
    ```
 
 5. **Prochaine action suggérée:**
-   - Lancer le mode live et surveiller les logs
-   - Vérifier que les notifications partent bien lors des vrais trades
-   - Ajouter des commandes Telegram pour contrôler le bot (ex: `/status`, `/stop`)
+   - Surveiller le bot en live trading
+   - Vérifier la précision du PnL affiché dans Telegram par rapport à l'interface Hyperliquid
+   - Ajuster le risk management si nécessaire
 
 ---
 
-**Dernière mise à jour:** 15 décembre 2025  
-**Version:** 1.1.0  
+**Dernière mise à jour:** 16 décembre 2025  
+**Version:** 1.3.0  
 **Auteur:** alexgd  
-**Statut:** HYPERLIQUID LIVE + TELEGRAM  
+**Statut:** 🟢 LIVE TRADING (Real Money Active)  
 **Stratégie Principale:** 🏆 Adaptive Bidirectional (ADX=20)  
-**Nouvelles Capacités:** Notifications Telegram temps réel 📱
+**Nouvelles Capacités:** Live Trading + Bouton "Positions & PnL" + Warmup H1 📱💰

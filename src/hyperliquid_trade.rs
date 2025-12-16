@@ -128,6 +128,34 @@ pub enum ExchangeResponseData {
     }
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct Fill {
+    pub coin: String,
+    pub px: String,
+    pub sz: String,
+    pub side: String,
+    pub time: u64,
+    #[serde(rename = "startPosition")]
+    pub start_position: String,
+    pub dir: String,
+    #[serde(rename = "closedPnl")]
+    pub closed_pnl: Option<String>,
+    pub hash: String,
+    pub oid: u64,
+    pub crossed: bool,
+    pub fee: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct Funding {
+    pub time: u64,
+    pub coin: String,
+    pub usdc: Option<String>,
+    pub szi: Option<String>,
+    #[serde(rename = "fundingRate")]
+    pub funding_rate: String,
+}
+
 /// Hyperliquid Trading Client with ECDSA signing
 pub struct HyperliquidTrader {
     private_key_hex: String,
@@ -188,6 +216,66 @@ impl HyperliquidTrader {
     #[cfg(feature = "websocket")]
     pub fn get_wallet_address(&self) -> &str {
         &self.wallet_address
+    }
+
+    /// Fetch account balance (clearinghouse state)
+    pub async fn get_account_balance(&self) -> Result<f64, Box<dyn std::error::Error>> {
+        let client = reqwest::Client::new();
+        let response = client
+            .post("https://api.hyperliquid.xyz/info")
+            .json(&json!({
+                "type": "clearinghouseState",
+                "user": self.wallet_address
+            }))
+            .send()
+            .await?
+            .json::<serde_json::Value>()
+            .await?;
+
+        // Parse marginSummary.accountValue
+        if let Some(margin_summary) = response.get("marginSummary") {
+            if let Some(account_value) = margin_summary.get("accountValue") {
+                if let Some(val_str) = account_value.as_str() {
+                    let val = val_str.parse::<f64>()?;
+                    return Ok(val);
+                }
+            }
+        }
+        
+        Err("Failed to parse account balance".into())
+    }
+
+    /// Fetch user fills (trade history)
+    pub async fn get_user_fills(&self) -> Result<Vec<Fill>, Box<dyn std::error::Error>> {
+        let client = reqwest::Client::new();
+        let response = client
+            .post("https://api.hyperliquid.xyz/info")
+            .json(&json!({
+                "type": "userFills",
+                "user": self.wallet_address
+            }))
+            .send()
+            .await?
+            .json::<Vec<Fill>>()
+            .await?;
+        Ok(response)
+    }
+
+    /// Fetch user funding history
+    pub async fn get_user_funding(&self, start_time: u64) -> Result<Vec<Funding>, Box<dyn std::error::Error>> {
+        let client = reqwest::Client::new();
+        let response = client
+            .post("https://api.hyperliquid.xyz/info")
+            .json(&json!({
+                "type": "userFunding",
+                "user": self.wallet_address,
+                "startTime": start_time
+            }))
+            .send()
+            .await?
+            .json::<Vec<Funding>>()
+            .await?;
+        Ok(response)
     }
 
     /// Fetch asset index from Hyperliquid API

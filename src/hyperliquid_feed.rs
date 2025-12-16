@@ -7,6 +7,8 @@ use serde_json::json;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use futures_util::{SinkExt, StreamExt};
 use std::collections::VecDeque;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use tokio::time::{sleep, Duration};
 use crate::position_manager::PositionState;
 use crate::hyperliquid_trade::HyperliquidTrader;
 
@@ -46,21 +48,24 @@ struct SubscriptionResponse {
     subscription: serde_json::Value,
 }
 
+use tokio::sync::Mutex;
+
 /// Client WebSocket pour Hyperliquid avec gestion de positions
 pub struct HyperliquidFeed {
     coin: String,
     interval: String,
     candle_buffer: VecDeque<HyperCandle>,
     strategy: crate::adaptive_strategy::AdaptiveStrategy,
-    position_manager: crate::position_manager::PositionManager,
+    position_manager: Arc<Mutex<crate::position_manager::PositionManager>>,
     order_simulator: crate::order_executor::OrderSimulator,
     trader: Option<HyperliquidTrader>,
     is_live: bool,
     telegram: Option<crate::telegram::TelegramBot>,
+    is_running: Arc<AtomicBool>,
 }
 
 impl HyperliquidFeed {
-    pub fn new(coin: String, interval: String, is_live: bool) -> Self {
+    pub fn new(coin: String, interval: String, is_live: bool, is_running: Arc<AtomicBool>) -> Self {
         use crate::adaptive_strategy::AdaptiveConfig;
         
         let trader = if is_live {
@@ -96,18 +101,31 @@ impl HyperliquidFeed {
                 adx_threshold: 20.0,
                 ..Default::default()
             }),
-            position_manager: crate::position_manager::PositionManager::new(INITIAL_BANKROLL_USDC),
+            position_manager: Arc::new(Mutex::new(crate::position_manager::PositionManager::new(INITIAL_BANKROLL_USDC))),
             order_simulator: crate::order_executor::OrderSimulator::new(),
             trader,
             is_live: is_live && is_trader_ready, // Ensure is_live is false if trader init failed
             telegram,
+            is_running,
         }
     }
 
     /// Récupère la bankroll réelle de l'utilisateur (via API Hyperliquid)
     async fn fetch_user_bankroll(&self) -> Result<f64, Box<dyn std::error::Error>> {
-        // Dans un vrai système, cela ferait appel à l'endpoint /info de Hyperliquid
-        // Pour maintenant, on retourne la bankroll initiale
+        if let Some(trader) = &self.trader {
+            println!("💰 Fetching real account balance from Hyperliquid...");
+            match trader.get_account_balance().await {
+                Ok(balance) => {
+                    println!("✅ Balance fetched: ${:.2}", balance);
+                    return Ok(balance);
+                },
+                Err(e) => {
+                    eprintln!("❌ Failed to fetch balance: {}", e);
+                    eprintln!("⚠️  Using default/fallback balance.");
+                }
+            }
+        }
+        
         Ok(INITIAL_BANKROLL_USDC)
     }
 
@@ -174,6 +192,20 @@ impl HyperliquidFeed {
         println!("║  🚀 HYPERLIQUID LIVE TRADING BOT - ADAPTIVE STRATEGY          ║");
         println!("╚════════════════════════════════════════════════════════════════╝\n");
         
+        // Spawn Telegram Listener if enabled
+        if let Some(telegram) = &self.telegram {
+            let bot = telegram.clone();
+            let is_running = self.is_running.clone();
+            let pm = self.position_manager.clone();
+            
+            // Send initial control panel
+            let _ = bot.send_control_keyboard(true).await;
+
+            tokio::spawn(async move {
+                bot.run_listener(is_running, pm).await;
+            });
+        }
+
         // Warmup indicators first
         self.warmup().await;
 
@@ -183,8 +215,11 @@ impl HyperliquidFeed {
             Err(_) => INITIAL_BANKROLL_USDC,
         };
 
-        self.position_manager.bankroll.total_balance = user_bankroll;
-        self.position_manager.bankroll.available_balance = user_bankroll;
+        {
+            let mut pm = self.position_manager.lock().await;
+            pm.bankroll.total_balance = user_bankroll;
+            pm.bankroll.available_balance = user_bankroll;
+        }
 
         println!("⚙️  Configuration:");
         println!("   DEX:              Hyperliquid");
@@ -197,13 +232,13 @@ impl HyperliquidFeed {
         if self.is_live {
             println!("   Mode:             🟢 LIVE TRADING (REAL MONEY)\n");
             
-            // Set Leverage to 2x (Isolated)
+            // Set Leverage to 5x (Isolated)
             if let Some(trader) = &self.trader {
-                println!("⚙️  Setting Leverage to 2x (Isolated)...");
-                if let Err(e) = trader.update_leverage(&self.coin, 2, false).await {
+                println!("⚙️  Setting Leverage to 5x (Isolated)...");
+                if let Err(e) = trader.update_leverage(&self.coin, 5, false).await {
                     eprintln!("⚠️  Failed to set leverage: {}", e);
                 } else {
-                    println!("✅ Leverage set to 2x");
+                    println!("✅ Leverage set to 5x");
                 }
             }
         } else {
@@ -317,13 +352,16 @@ impl HyperliquidFeed {
             self.display_indicators(Some(candle.c));
             
             // Mettre à jour le P&L actuel si position ouverte
-            self.position_manager.update_current_pnl(candle.c);
+            {
+                let mut pm = self.position_manager.lock().await;
+                pm.update_current_pnl(candle.c);
+            }
             
             // Traiter les signaux de trading
             self.handle_trading_signal(signal, candle.c, candle.t).await;
             
             // Afficher l'état de la position
-            self.display_position_status();
+            self.display_position_status().await;
         } else {
             println!("\n⏳ Warming up indicators... ({}/50 candles)", self.candle_buffer.len());
         }
@@ -341,20 +379,21 @@ impl HyperliquidFeed {
         use crate::adaptive_strategy::Signal;
         use crate::position_manager::PositionState;
 
+        // Check if bot is running (Telegram Control)
+        if !self.is_running.load(Ordering::SeqCst) {
+            if matches!(signal, Signal::Hold) { return; }
+            println!("⏸️  Bot is PAUSED. Ignoring signal: {:?}", signal);
+            return;
+        }
+
         match signal {
             Signal::BuyRange | Signal::BuyTrend => {
-                if self.position_manager.position.is_none() {
-                    // Calculer le SL à 2% en dessous du prix d'entrée
-                    let stop_loss_price = current_price * 0.98;
+                let mut pm = self.position_manager.lock().await;
+                if pm.position.is_none() {
+                    // Calculer le SL à 1% en dessous du prix d'entrée (Optimized Strategy)
+                    let stop_loss_price = current_price * 0.99;
                     
-                    if let Some(position) = self.position_manager.open_long(current_price, current_time, stop_loss_price) {
-                        println!("\n💰 TRADE EXECUTION:");
-                        println!("   Action:     🟢 BUY (LONG)");
-                        println!("   Entry:      ${:.2}", position.entry_price);
-                        println!("   Size:       {:.4} SOL", position.position_size);
-                        println!("   Value:      ${:.2}", position.position_value);
-                        println!("   SL Price:   ${:.2} (-2%)", position.stop_loss_price);
-                        println!("   Available:  ${:.2}", self.position_manager.bankroll.available_balance);
+                    if let Some(mut position) = pm.open_long(current_price, current_time, stop_loss_price) {
                         
                         if self.is_live {
                             if let Some(trader) = &self.trader {
@@ -364,13 +403,45 @@ impl HyperliquidFeed {
                                     Ok(oid) => {
                                         println!("✅ LIVE ORDER PLACED: OID {}", oid);
                                         
+                                        // Wait for fill to get real price
+                                        println!("⏳ Waiting for fill details...");
+                                        sleep(Duration::from_secs(2)).await;
+                                        
+                                        // Fetch real fill data
+                                        if let Ok(fills) = trader.get_user_fills().await {
+                                            // Find the fill for this order (approximate by time and coin)
+                                            let recent_fill = fills.iter().find(|f| 
+                                                f.coin == self.coin && 
+                                                f.side == "B" && 
+                                                f.time > (current_time - 10000)
+                                            );
+                                            
+                                            if let Some(fill) = recent_fill {
+                                                let real_price = fill.px.parse::<f64>().unwrap_or(current_price);
+                                                let real_fee = fill.fee.parse::<f64>().unwrap_or(0.0);
+                                                
+                                                println!("📝 Real Fill: ${:.2} (Fee: ${:.4})", real_price, real_fee);
+                                                
+                                                // Update position with real data
+                                                if let Some(pos) = &mut pm.position {
+                                                    pos.entry_price = real_price;
+                                                    pos.entry_fee = real_fee;
+                                                    // Recalculate SL based on real entry
+                                                    let sl_pct = 0.01;
+                                                    pos.stop_loss_price = real_price * (1.0 - sl_pct);
+                                                    pos.stop_loss_pct = sl_pct * 100.0;
+                                                    position.entry_price = real_price; // Update local copy for display
+                                                    position.stop_loss_price = pos.stop_loss_price;
+                                                }
+                                            }
+                                        }
+                                        
                                         // 🛡️ INTEGRATED STOP LOSS for LONG
                                         // SL is below entry price
-                                        let sl_pct = 0.05; 
-                                        let sl_price = current_price * (1.0 - sl_pct);
+                                        let sl_price = position.stop_loss_price;
                                         let sl_price = (sl_price * 100.0).round() / 100.0;
                                         
-                                        println!("🛡️ PLACING STOP LOSS @ ${:.2} (-5%)...", sl_price);
+                                        println!("🛡️ PLACING STOP LOSS @ ${:.2} (-1%)...", sl_price);
                                         match trader.place_stop_loss_order(&self.coin, false, sl_price, position.position_size).await {
                                             Ok(sl_oid) => println!("✅ STOP LOSS PLACED: OID {}", sl_oid),
                                             Err(e) => eprintln!("❌ STOP LOSS FAILED: {}", e),
@@ -382,68 +453,139 @@ impl HyperliquidFeed {
                         } else {
                             println!("   ⚠️  Mode: DRY RUN - Position simulated only");
                         }
+
+                        println!("\n💰 TRADE EXECUTION:");
+                        println!("   Action:     🟢 BUY (LONG)");
+                        println!("   Entry:      ${:.2}", position.entry_price);
+                        println!("   Size:       {:.4} SOL", position.position_size);
+                        println!("   Value:      ${:.2}", position.position_value);
+                        println!("   SL Price:   ${:.2} (-1%)", position.stop_loss_price);
+                        println!("   Available:  ${:.2}", pm.bankroll.available_balance);
                     }
                 }
             }
             Signal::SellRange | Signal::SellTrend => {
-                if let Some(pos) = &self.position_manager.position {
+                let mut pm = self.position_manager.lock().await;
+                let mut should_close = false;
+                let mut entry_fee = 0.0;
+                let mut entry_time = 0;
+                
+                if let Some(pos) = &pm.position {
                     if pos.state == PositionState::Long {
-                        if let Some(closed) = self.position_manager.close_position(current_price, current_time) {
-                            println!("\n💰 TRADE EXECUTION:");
-                            println!("   Action:     🔴 SELL (CLOSE LONG)");
-                            println!("   Exit:       ${:.2}", closed.exit_price);
-                            println!("   Size:       {:.4} SOL", closed.position_size);
-                            println!("   P&L:        ${:+.2} ({:+.1}%)", closed.profit_loss, closed.profit_loss_pct);
-                            println!("   Balance:    ${:.2}", self.position_manager.bankroll.total_balance);
-                            
-                            // 📱 Telegram Notification
-                            if let Some(telegram) = &self.telegram {
-                                let pnl_emoji = if closed.profit_loss >= 0.0 { "🟢" } else { "🔴" };
-                                let message = format!(
-                                    "💰 *Position Closed*\n\n\
-                                    Action: 🔴 SELL (CLOSE LONG)\n\
-                                    Exit Price: ${:.2}\n\
-                                    Size: {:.4} SOL\n\
-                                    P&L: {} ${:+.2} ({:+.2}%)\n\
-                                    Balance: ${:.2}",
-                                    closed.exit_price,
-                                    closed.position_size,
-                                    pnl_emoji, closed.profit_loss, closed.profit_loss_pct,
-                                    self.position_manager.bankroll.total_balance
-                                );
-                                
-                                let _ = telegram.send_message(&message).await;
-                            }
+                        should_close = true;
+                        entry_fee = pos.entry_fee;
+                        entry_time = pos.entry_time;
+                    }
+                }
 
-                            if self.is_live {
-                                if let Some(trader) = &self.trader {
-                                    println!("🚀 EXECUTING LIVE ORDER...");
-                                    // Use Market Order to close position
-                                    match trader.place_market_order(&self.coin, false, closed.position_size, current_price, 0.05).await {
-                                        Ok(oid) => println!("✅ LIVE ORDER PLACED: OID {}", oid),
-                                        Err(e) => eprintln!("❌ LIVE ORDER FAILED: {}", e),
-                                    }
+                if should_close {
+                    if let Some(closed) = pm.close_position(current_price, current_time) {
+                        
+                        let mut final_exit_price = closed.exit_price;
+                        let mut final_pnl = closed.profit_loss;
+                        let mut final_net_pnl = closed.profit_loss;
+                        let mut is_real_data = false;
+
+                        if self.is_live {
+                            if let Some(trader) = &self.trader {
+                                println!("🚀 EXECUTING LIVE ORDER...");
+                                // Use Market Order to close position
+                                match trader.place_market_order(&self.coin, false, closed.position_size, current_price, 0.05).await {
+                                    Ok(oid) => {
+                                        println!("✅ LIVE ORDER PLACED: OID {}", oid);
+                                        
+                                        println!("⏳ Waiting for fill details...");
+                                        sleep(Duration::from_secs(2)).await;
+
+                                        // Fetch real data
+                                        let mut realized_pnl = 0.0;
+                                        let mut closing_fee = 0.0;
+                                        let mut funding_paid = 0.0;
+
+                                        if let Ok(fills) = trader.get_user_fills().await {
+                                            let recent_fill = fills.iter().find(|f| 
+                                                f.coin == self.coin && 
+                                                f.side == "A" && // Sell
+                                                f.time > (current_time - 10000)
+                                            );
+                                            
+                                            if let Some(fill) = recent_fill {
+                                                final_exit_price = fill.px.parse().unwrap_or(closed.exit_price);
+                                                closing_fee = fill.fee.parse().unwrap_or(0.0);
+                                                if let Some(pnl_str) = &fill.closed_pnl {
+                                                    realized_pnl = pnl_str.parse().unwrap_or(0.0);
+                                                } else {
+                                                    realized_pnl = (final_exit_price - closed.entry_price) * closed.position_size;
+                                                }
+                                                is_real_data = true;
+                                            }
+                                        }
+
+                                        // Fetch funding
+                                        if let Ok(fundings) = trader.get_user_funding(entry_time).await {
+                                            for f in fundings {
+                                                if f.coin == self.coin {
+                                                    let amount = f.usdc.as_ref().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                                                    funding_paid += amount;
+                                                }
+                                            }
+                                        }
+
+                                        final_pnl = realized_pnl;
+                                        final_net_pnl = realized_pnl - closing_fee - entry_fee + funding_paid;
+                                        
+                                        println!("📝 Real Data: Exit=${:.2}, PnL=${:.2}, Fee=${:.4}, Funding=${:.4}", 
+                                            final_exit_price, realized_pnl, closing_fee + entry_fee, funding_paid);
+                                    },
+                                    Err(e) => eprintln!("❌ LIVE ORDER FAILED: {}", e),
                                 }
-                            } else {
-                                println!("   ⚠️  Mode: DRY RUN - Position closed simulated only");
                             }
+                        } else {
+                            println!("   ⚠️  Mode: DRY RUN - Position closed simulated only");
+                            let estimated_fee = closed.position_size * closed.exit_price * 0.0005 * 2.0;
+                            final_net_pnl = closed.profit_loss - estimated_fee;
+                        }
+
+                        println!("\n💰 TRADE EXECUTION:");
+                        println!("   Action:     🔴 SELL (CLOSE LONG)");
+                        println!("   Exit:       ${:.2}", final_exit_price);
+                        println!("   Size:       {:.4} SOL", closed.position_size);
+                        println!("   P&L:        ${:+.2}", final_pnl);
+                        println!("   Net P&L:    ${:+.2}", final_net_pnl);
+                        println!("   Balance:    ${:.2}", pm.bankroll.total_balance);
+                        
+                        // 📱 Telegram Notification
+                        if let Some(telegram) = &self.telegram {
+                            let pnl_emoji = if final_net_pnl >= 0.0 { "🟢" } else { "🔴" };
+                            let pnl_type = if is_real_data { "Real" } else { "Est" };
+                            
+                            let message = format!(
+                                "💰 *Position Closed*\n\n\
+                                Action: 🔴 SELL (CLOSE LONG)\n\
+                                Exit Price: ${:.2}\n\
+                                Size: {:.4} SOL\n\
+                                Gross P&L: ${:+.2}\n\
+                                Net P&L ({}): {} ${:+.2} ({:+.2}%)\n\
+                                Balance: ${:.2}",
+                                final_exit_price,
+                                closed.position_size,
+                                final_pnl,
+                                pnl_type, pnl_emoji, final_net_pnl, (final_net_pnl / (closed.position_size * closed.entry_price)) * 100.0,
+                                pm.bankroll.total_balance
+                            );
+                            
+                            let _ = telegram.send_message(&message).await;
                         }
                     }
                 }
             }
             Signal::SellShort => {
-                if self.position_manager.position.is_none() {
-                    // Calculer le SL à 2% au-dessus du prix d'entrée (pour un short)
-                    let stop_loss_price = current_price * 1.02;
+                let mut pm = self.position_manager.lock().await;
+                if pm.position.is_none() {
+                    // Calculer le SL à 1% au-dessus du prix d'entrée (pour un short)
+                    let stop_loss_price = current_price * 1.01;
                     
-                    if let Some(position) = self.position_manager.open_short(current_price, current_time, stop_loss_price) {
-                        println!("\n💰 TRADE EXECUTION:");
-                        println!("   Action:     📉 SHORT");
-                        println!("   Entry:      ${:.2}", position.entry_price);
-                        println!("   Size:       {:.4} SOL", position.position_size);
-                        println!("   Value:      ${:.2}", position.position_value);
-                        println!("   SL Price:   ${:.2} (+2%)", position.stop_loss_price);
-                        println!("   Available:  ${:.2}", self.position_manager.bankroll.available_balance);
+                    if let Some(mut position) = pm.open_short(current_price, current_time, stop_loss_price) {
                         
                         if self.is_live {
                             if let Some(trader) = &self.trader {
@@ -453,13 +595,40 @@ impl HyperliquidFeed {
                                     Ok(oid) => {
                                         println!("✅ LIVE ORDER PLACED: OID {}", oid);
                                         
+                                        println!("⏳ Waiting for fill details...");
+                                        sleep(Duration::from_secs(2)).await;
+                                        
+                                        if let Ok(fills) = trader.get_user_fills().await {
+                                            let recent_fill = fills.iter().find(|f| 
+                                                f.coin == self.coin && 
+                                                f.side == "A" && // Sell Short
+                                                f.time > (current_time - 10000)
+                                            );
+                                            
+                                            if let Some(fill) = recent_fill {
+                                                let real_price = fill.px.parse::<f64>().unwrap_or(current_price);
+                                                let real_fee = fill.fee.parse::<f64>().unwrap_or(0.0);
+                                                
+                                                println!("📝 Real Fill: ${:.2} (Fee: ${:.4})", real_price, real_fee);
+                                                
+                                                if let Some(pos) = &mut pm.position {
+                                                    pos.entry_price = real_price;
+                                                    pos.entry_fee = real_fee;
+                                                    let sl_pct = 0.01;
+                                                    pos.stop_loss_price = real_price * (1.0 + sl_pct);
+                                                    pos.stop_loss_pct = sl_pct * 100.0;
+                                                    position.entry_price = real_price;
+                                                    position.stop_loss_price = pos.stop_loss_price;
+                                                }
+                                            }
+                                        }
+                                        
                                         // 🛡️ INTEGRATED STOP LOSS for SHORT
                                         // SL is above entry price
-                                        let sl_pct = 0.05; 
-                                        let sl_price = current_price * (1.0 + sl_pct);
+                                        let sl_price = position.stop_loss_price;
                                         let sl_price = (sl_price * 100.0).round() / 100.0;
                                         
-                                        println!("🛡️ PLACING STOP LOSS @ ${:.2} (+5%)...", sl_price);
+                                        println!("🛡️ PLACING STOP LOSS @ ${:.2} (+1%)...", sl_price);
                                         match trader.place_stop_loss_order(&self.coin, true, sl_price, position.position_size).await {
                                             Ok(sl_oid) => println!("✅ STOP LOSS PLACED: OID {}", sl_oid),
                                             Err(e) => eprintln!("❌ STOP LOSS FAILED: {}", e),
@@ -471,52 +640,126 @@ impl HyperliquidFeed {
                         } else {
                             println!("   ⚠️  Mode: DRY RUN - Position simulated only");
                         }
+
+                        println!("\n💰 TRADE EXECUTION:");
+                        println!("   Action:     📉 SHORT");
+                        println!("   Entry:      ${:.2}", position.entry_price);
+                        println!("   Size:       {:.4} SOL", position.position_size);
+                        println!("   Value:      ${:.2}", position.position_value);
+                        println!("   SL Price:   ${:.2} (+1%)", position.stop_loss_price);
+                        println!("   Available:  ${:.2}", pm.bankroll.available_balance);
                     }
                 }
             }
             Signal::CoverShort => {
-                if let Some(pos) = &self.position_manager.position {
+                let mut pm = self.position_manager.lock().await;
+                let mut should_close = false;
+                let mut entry_fee = 0.0;
+                let mut entry_time = 0;
+
+                if let Some(pos) = &pm.position {
                     if pos.state == PositionState::Short {
-                        if let Some(closed) = self.position_manager.close_position(current_price, current_time) {
-                            println!("\n💰 TRADE EXECUTION:");
-                            println!("   Action:     🔼 COVER SHORT");
-                            println!("   Exit:       ${:.2}", closed.exit_price);
-                            println!("   Size:       {:.4} SOL", closed.position_size);
-                            println!("   P&L:        ${:+.2} ({:+.1}%)", closed.profit_loss, closed.profit_loss_pct);
-                            println!("   Balance:    ${:.2}", self.position_manager.bankroll.total_balance);
-                            
-                            // 📱 Telegram Notification
-                            if let Some(telegram) = &self.telegram {
-                                let pnl_emoji = if closed.profit_loss >= 0.0 { "🟢" } else { "🔴" };
-                                let message = format!(
-                                    "💰 *Position Closed*\n\n\
-                                    Action: 🔼 COVER SHORT\n\
-                                    Exit Price: ${:.2}\n\
-                                    Size: {:.4} SOL\n\
-                                    P&L: {} ${:+.2} ({:+.2}%)\n\
-                                    Balance: ${:.2}",
-                                    closed.exit_price,
-                                    closed.position_size,
-                                    pnl_emoji, closed.profit_loss, closed.profit_loss_pct,
-                                    self.position_manager.bankroll.total_balance
-                                );
-                                
-                                let _ = telegram.send_message(&message).await;
-                            }
+                        should_close = true;
+                        entry_fee = pos.entry_fee;
+                        entry_time = pos.entry_time;
+                    }
+                }
 
-                            if self.is_live {
-                                if let Some(trader) = &self.trader {
-                                    println!("🚀 EXECUTING LIVE ORDER...");
-                                    // Use Market Order to close position
-                                    match trader.place_market_order(&self.coin, true, closed.position_size, current_price, 0.05).await {
-                                        Ok(oid) => println!("✅ LIVE ORDER PLACED: OID {}", oid),
-                                        Err(e) => eprintln!("❌ LIVE ORDER FAILED: {}", e),
-                                    }
+                if should_close {
+                    if let Some(closed) = pm.close_position(current_price, current_time) {
+                        
+                        let mut final_exit_price = closed.exit_price;
+                        let mut final_pnl = closed.profit_loss;
+                        let mut final_net_pnl = closed.profit_loss;
+                        let mut is_real_data = false;
+
+                        if self.is_live {
+                            if let Some(trader) = &self.trader {
+                                println!("🚀 EXECUTING LIVE ORDER...");
+                                // Use Market Order to close position
+                                match trader.place_market_order(&self.coin, true, closed.position_size, current_price, 0.05).await {
+                                    Ok(oid) => {
+                                        println!("✅ LIVE ORDER PLACED: OID {}", oid);
+                                        
+                                        println!("⏳ Waiting for fill details...");
+                                        sleep(Duration::from_secs(2)).await;
+
+                                        let mut realized_pnl = 0.0;
+                                        let mut closing_fee = 0.0;
+                                        let mut funding_paid = 0.0;
+
+                                        if let Ok(fills) = trader.get_user_fills().await {
+                                            let recent_fill = fills.iter().find(|f| 
+                                                f.coin == self.coin && 
+                                                f.side == "B" && // Buy to Cover
+                                                f.time > (current_time - 10000)
+                                            );
+                                            
+                                            if let Some(fill) = recent_fill {
+                                                final_exit_price = fill.px.parse().unwrap_or(closed.exit_price);
+                                                closing_fee = fill.fee.parse().unwrap_or(0.0);
+                                                if let Some(pnl_str) = &fill.closed_pnl {
+                                                    realized_pnl = pnl_str.parse().unwrap_or(0.0);
+                                                } else {
+                                                    realized_pnl = (closed.entry_price - final_exit_price) * closed.position_size;
+                                                }
+                                                is_real_data = true;
+                                            }
+                                        }
+
+                                        if let Ok(fundings) = trader.get_user_funding(entry_time).await {
+                                            for f in fundings {
+                                                if f.coin == self.coin {
+                                                    let amount = f.usdc.as_ref().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                                                    funding_paid += amount;
+                                                }
+                                            }
+                                        }
+
+                                        final_pnl = realized_pnl;
+                                        final_net_pnl = realized_pnl - closing_fee - entry_fee + funding_paid;
+                                        
+                                        println!("📝 Real Data: Exit=${:.2}, PnL=${:.2}, Fee=${:.4}, Funding=${:.4}", 
+                                            final_exit_price, realized_pnl, closing_fee + entry_fee, funding_paid);
+                                    },
+                                    Err(e) => eprintln!("❌ LIVE ORDER FAILED: {}", e),
                                 }
-                            } else {
-                                println!("   ⚠️  Mode: DRY RUN - Position simulated only");
                             }
+                        } else {
+                            println!("   ⚠️  Mode: DRY RUN - Position simulated only");
+                            let estimated_fee = closed.position_size * closed.exit_price * 0.0005 * 2.0;
+                            final_net_pnl = closed.profit_loss - estimated_fee;
+                        }
 
+                        println!("\n💰 TRADE EXECUTION:");
+                        println!("   Action:     🔼 COVER SHORT");
+                        println!("   Exit:       ${:.2}", final_exit_price);
+                        println!("   Size:       {:.4} SOL", closed.position_size);
+                        println!("   P&L:        ${:+.2}", final_pnl);
+                        println!("   Net P&L:    ${:+.2}", final_net_pnl);
+                        println!("   Balance:    ${:.2}", pm.bankroll.total_balance);
+                        
+                        // 📱 Telegram Notification
+                        if let Some(telegram) = &self.telegram {
+                            let pnl_emoji = if final_net_pnl >= 0.0 { "🟢" } else { "🔴" };
+                            let pnl_type = if is_real_data { "Real" } else { "Est" };
+                            
+                            let message = format!(
+                                "💰 *Position Closed*\n\n\
+                                Action: 🔼 COVER SHORT\n\
+                                Exit Price: ${:.2}\n\
+                                Size: {:.4} SOL\n\
+                                Gross P&L: ${:+.2}\n\
+                                Net P&L ({}): {} ${:+.2} ({:+.2}%)\n\
+                                Balance: ${:.2}",
+                                final_exit_price,
+                                closed.position_size,
+                                final_pnl,
+                                pnl_type, pnl_emoji, final_net_pnl, (final_net_pnl / (closed.position_size * closed.entry_price)) * 100.0,
+                                pm.bankroll.total_balance
+                            );
+                            
+                            let _ = telegram.send_message(&message).await;
                         }
                     }
                 }
@@ -526,10 +769,11 @@ impl HyperliquidFeed {
     }
 
     /// Affiche l'état actuel de la position
-    fn display_position_status(&self) {
+    async fn display_position_status(&self) {
         println!("\n📊 POSITION STATUS:");
         
-        if let Some(pos) = &self.position_manager.position {
+        let pm = self.position_manager.lock().await;
+        if let Some(pos) = &pm.position {
             let state_str = match pos.state {
                 PositionState::Long => "🟢 LONG",
                 PositionState::Short => "📉 SHORT",
@@ -548,11 +792,11 @@ impl HyperliquidFeed {
             }
         } else {
             println!("   State:        ⚪ NO POSITION");
-            println!("   Available:    ${:.2}", self.position_manager.bankroll.available_balance);
+            println!("   Available:    ${:.2}", pm.bankroll.available_balance);
         }
         
         // Afficher les stats de trading
-        let stats = self.position_manager.get_stats();
+        let stats = pm.get_stats();
         println!("\n📈 TRADING STATS:");
         println!("   Total Trades:  {}", stats.total_trades);
         println!("   Win Rate:      {:.1}%", stats.win_rate);
@@ -622,10 +866,11 @@ impl HyperliquidFeed {
 /// Fonction publique pour lancer le bot de trading live
 pub async fn run_live_trading() -> Result<(), Box<dyn std::error::Error>> {
     let is_live = std::env::var("LIVE_TRADING").unwrap_or_else(|_| "false".to_string()) == "true";
+    let is_running = Arc::new(AtomicBool::new(true)); // Shared state across reconnections
     
     loop {
         println!("\n🔄 Starting trading loop...");
-        let mut feed = HyperliquidFeed::new(COIN.to_string(), CANDLE_INTERVAL.to_string(), is_live);
+        let mut feed = HyperliquidFeed::new(COIN.to_string(), CANDLE_INTERVAL.to_string(), is_live, is_running.clone());
         
         if let Err(e) = feed.connect_and_trade().await {
             eprintln!("❌ Trading loop error: {}", e);
