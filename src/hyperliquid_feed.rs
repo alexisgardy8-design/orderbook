@@ -87,20 +87,25 @@ impl HyperliquidFeed {
     ) -> Self {
         use crate::adaptive_strategy::AdaptiveConfig;
         
-        let trader = if is_live {
-            match HyperliquidTrader::new() {
-                Ok(t) => {
+        // Always try to initialize trader to fetch balance/prices, even in DRY RUN
+        let trader = match HyperliquidTrader::new() {
+            Ok(t) => {
+                if is_live {
                     println!("✅ LIVE TRADING ENABLED - Wallet: {}", t.wallet_address);
-                    Some(t)
-                },
-                Err(e) => {
+                } else {
+                    println!("ℹ️  Hyperliquid Connection Active (Read-Only) - Wallet: {}", t.wallet_address);
+                }
+                Some(t)
+            },
+            Err(e) => {
+                if is_live {
                     eprintln!("❌ Failed to initialize trader: {}", e);
                     eprintln!("⚠️  Falling back to DRY RUN mode");
-                    None
+                } else {
+                    // Silent fail in dry run if keys are missing
                 }
+                None
             }
-        } else {
-            None
         };
 
         let is_trader_ready = trader.is_some();
@@ -264,6 +269,21 @@ impl HyperliquidFeed {
             }
         } else {
             println!("   Mode:             🔴 DRY RUN (signaux uniquement)\n");
+        }
+
+        // 📝 Log Startup to Supabase
+        {
+            let pm = self.position_manager.lock().await;
+            if let Some(client) = &pm.supabase {
+                let mode = if self.is_live { "LIVE TRADING" } else { "DRY RUN" };
+                let log_msg = format!("Bot started - {} - {} {}", mode, self.coin, self.interval);
+                let context = format!("Bankroll: ${:.2}", user_bankroll);
+                
+                let client_clone = client.clone();
+                tokio::spawn(async move {
+                    let _ = client_clone.log("INFO", &log_msg, Some(&context)).await;
+                });
+            }
         }
 
         println!("🌐 Connecting to Hyperliquid WebSocket...");
