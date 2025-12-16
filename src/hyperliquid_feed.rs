@@ -11,6 +11,7 @@ use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use tokio::time::{sleep, Duration};
 use crate::position_manager::PositionState;
 use crate::hyperliquid_trade::HyperliquidTrader;
+use crate::hyperliquid_historical::HyperliquidHistoricalData;
 
 const HYPERLIQUID_WS_URL: &str = "wss://api.hyperliquid.xyz/ws";
 const COIN: &str = "SOL";
@@ -62,10 +63,28 @@ pub struct HyperliquidFeed {
     is_live: bool,
     telegram: Option<crate::telegram::TelegramBot>,
     is_running: Arc<AtomicBool>,
+    last_processed_candle_t: u64,
 }
 
 impl HyperliquidFeed {
-    pub fn new(coin: String, interval: String, is_live: bool, is_running: Arc<AtomicBool>) -> Self {
+    /// Formatte un timestamp en date lisible
+    fn format_timestamp(ts: u64) -> String {
+        let secs = (ts / 1000) as i64;
+        if let Some(dt) = chrono::DateTime::from_timestamp(secs, 0) {
+            dt.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+        } else {
+            "Invalid timestamp".to_string()
+        }
+    }
+    
+    pub fn new(
+        coin: String, 
+        interval: String, 
+        is_live: bool, 
+        is_running: Arc<AtomicBool>,
+        position_manager: Arc<Mutex<crate::position_manager::PositionManager>>,
+        telegram: Option<crate::telegram::TelegramBot>
+    ) -> Self {
         use crate::adaptive_strategy::AdaptiveConfig;
         
         let trader = if is_live {
@@ -86,7 +105,6 @@ impl HyperliquidFeed {
 
         let is_trader_ready = trader.is_some();
         
-        let telegram = crate::telegram::TelegramBot::new();
         if telegram.is_some() {
             println!("✅ Telegram Notifications Enabled");
         } else {
@@ -101,12 +119,13 @@ impl HyperliquidFeed {
                 adx_threshold: 20.0,
                 ..Default::default()
             }),
-            position_manager: Arc::new(Mutex::new(crate::position_manager::PositionManager::new(INITIAL_BANKROLL_USDC))),
+            position_manager,
             order_simulator: crate::order_executor::OrderSimulator::new(),
             trader,
             is_live: is_live && is_trader_ready, // Ensure is_live is false if trader init failed
             telegram,
             is_running,
+            last_processed_candle_t: 0,
         }
     }
 
@@ -178,6 +197,9 @@ impl HyperliquidFeed {
                     }
                 }
                 println!("✅ Indicators warmed up! Buffer size: {}", self.candle_buffer.len());
+                if let Some(last) = self.candle_buffer.back() {
+                    self.last_processed_candle_t = last.t;
+                }
                 let last_price = self.candle_buffer.back().map(|c| c.c);
                 self.display_indicators(last_price);
             },
@@ -192,18 +214,9 @@ impl HyperliquidFeed {
         println!("║  🚀 HYPERLIQUID LIVE TRADING BOT - ADAPTIVE STRATEGY          ║");
         println!("╚════════════════════════════════════════════════════════════════╝\n");
         
-        // Spawn Telegram Listener if enabled
+        // Send initial control panel if Telegram is enabled
         if let Some(telegram) = &self.telegram {
-            let bot = telegram.clone();
-            let is_running = self.is_running.clone();
-            let pm = self.position_manager.clone();
-            
-            // Send initial control panel
-            let _ = bot.send_control_keyboard(true).await;
-
-            tokio::spawn(async move {
-                bot.run_listener(is_running, pm).await;
-            });
+             let _ = telegram.send_control_keyboard(true).await;
         }
 
         // Warmup indicators first
@@ -267,106 +280,257 @@ impl HyperliquidFeed {
         // Traiter les messages entrants
         let mut message_count = 0;
         let mut candle_count = 0;
+        
+        // Timer pour vérifier le changement d'heure et fetcher activement les bougies
+        let mut check_interval = tokio::time::interval(Duration::from_secs(10));
+        let mut last_checked_hour = 0u64;
 
-        while let Some(message) = read.next().await {
-            match message {
-                Ok(Message::Text(text)) => {
-                    message_count += 1;
-
-                    // Parser le message
-                    if let Ok(ws_msg) = serde_json::from_str::<WebSocketMessage>(&text) {
-                        match ws_msg.channel.as_str() {
-                            "subscriptionResponse" => {
-                                if let Ok(resp) = serde_json::from_value::<SubscriptionResponse>(ws_msg.data) {
-                                    println!("✅ Subscription confirmed: {:?}\n", resp.subscription);
-                                    println!("🔄 Waiting for candle data...\n");
-                                }
-                            }
-                            "candle" => {
-                                // Parser les bougies
-                                if let Ok(candles) = serde_json::from_value::<Vec<HyperCandle>>(ws_msg.data) {
-                                    for candle in candles {
+        loop {
+            tokio::select! {
+                _ = check_interval.tick() => {
+                    // Vérifier si on a changé d'heure
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64;
+                    
+                    let current_hour = (now / 3600000) * 3600000; // Arrondir à l'heure pile
+                    
+                    // Si on vient de changer d'heure (et qu'on a initialisé)
+                    if last_checked_hour != 0 && current_hour > last_checked_hour {
+                        println!("\n⏰ Hour changed detected! Fetching last closed candle via REST API...");
+                        println!("   Previous hour: {}", last_checked_hour);
+                        println!("   Current hour:  {}", current_hour);
+                        
+                        // Fetcher la dernière bougie fermée (celle de last_checked_hour)
+                        let historical = HyperliquidHistoricalData::new(self.coin.clone(), self.interval.clone());
+                        
+                        // Fetch la bougie entre last_checked_hour et current_hour
+                        match historical.fetch_candles(last_checked_hour, current_hour) {
+                            Ok(candles) => {
+                                if let Some(closed_candle) = candles.first() {
+                                    println!("✅ Fetched closed candle via REST: t={}", closed_candle.t);
+                                    
+                                    // Convertir en HyperCandle avec f64
+                                    if let Ok((o, h, l, c, v)) = closed_candle.to_ohlc() {
+                                        let candle_f64 = HyperCandle {
+                                            t: closed_candle.t,
+                                            close_t: closed_candle.close_t,
+                                            s: closed_candle.s.clone(),
+                                            i: closed_candle.i.clone(),
+                                            o,
+                                            c,
+                                            h,
+                                            l,
+                                            v,
+                                            n: closed_candle.n,
+                                        };
+                                        
+                                        // Process comme si c'était venu du WebSocket
                                         candle_count += 1;
-                                        self.process_candle(candle, candle_count).await;
+                                        self.process_candle(candle_f64, candle_count, true).await;
                                     }
                                 }
-                            }
-                            _ => {
-                                // Ignorer les autres channels
-                            }
+                            },
+                            Err(e) => eprintln!("⚠️ Failed to fetch closed candle: {}", e),
                         }
                     }
-
-                    // Afficher un heartbeat toutes les 50 messages
-                    if message_count % 50 == 0 {
-                        println!("💓 Heartbeat - Messages: {}, Candles: {}, Buffer: {}", 
-                            message_count, candle_count, self.candle_buffer.len());
+                    
+                    // Mettre à jour le tracker d'heure
+                    if last_checked_hour == 0 {
+                        last_checked_hour = current_hour;
+                    } else if current_hour > last_checked_hour {
+                        last_checked_hour = current_hour;
                     }
                 }
-                Ok(Message::Ping(data)) => {
-                    write.send(Message::Pong(data)).await?;
+                
+                message = read.next() => {
+                    if let Some(message) = message {
+                        match message {
+                            Ok(Message::Text(text)) => {
+                                message_count += 1;
+
+                                // Parser le message
+                                if let Ok(ws_msg) = serde_json::from_str::<WebSocketMessage>(&text) {
+                                    match ws_msg.channel.as_str() {
+                                        "subscriptionResponse" => {
+                                            if let Ok(resp) = serde_json::from_value::<SubscriptionResponse>(ws_msg.data) {
+                                                println!("✅ Subscription confirmed: {:?}\n", resp.subscription);
+                                                println!("🔄 Waiting for candle data...\n");
+                                            }
+                                        }
+                                        "candle" => {
+                                            // Parser les bougies
+                                            if let Ok(candles) = serde_json::from_value::<Vec<HyperCandle>>(ws_msg.data) {
+                                                for candle in candles {
+                                                    candle_count += 1;
+                                                    self.process_candle(candle, candle_count, false).await;
+                                                }
+                                            }
+                                        }
+                                        _ => {
+                                            // Ignorer les autres channels
+                                        }
+                                    }
+                                }
+
+                                // Afficher un heartbeat toutes les 50 messages
+                                if message_count % 50 == 0 {
+                                    println!("💓 Heartbeat - Messages: {}, Candles: {}, Buffer: {}", 
+                                        message_count, candle_count, self.candle_buffer.len());
+                                }
+                            }
+                            Ok(Message::Ping(data)) => {
+                                write.send(Message::Pong(data)).await?;
+                            }
+                            Ok(Message::Close(_)) => {
+                                println!("\n⚠️  Connection closed by server");
+                                break;
+                            }
+                            Err(e) => {
+                                eprintln!("❌ WebSocket error: {}", e);
+                                break;
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        break;
+                    }
                 }
-                Ok(Message::Close(_)) => {
-                    println!("\n⚠️  Connection closed by server");
-                    break;
-                }
-                Err(e) => {
-                    eprintln!("❌ WebSocket error: {}", e);
-                    break;
-                }
-                _ => {}
             }
         }
 
         Ok(())
     }
 
-    /// Traite une bougie reçue et génère des signaux
-    async fn process_candle(&mut self, candle: HyperCandle, count: usize) {
-        // Ajouter au buffer
-        self.candle_buffer.push_back(candle.clone());
-        if self.candle_buffer.len() > CANDLE_BUFFER_SIZE {
-            self.candle_buffer.pop_front();
-        }
-
-        // Afficher la bougie
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        println!("🕯️  CANDLE #{} - {} {}", count, candle.s, self.interval);
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        println!("   Open:   ${:.2}", candle.o);
-        println!("   High:   ${:.2}", candle.h);
-        println!("   Low:    ${:.2}", candle.l);
-        println!("   Close:  ${:.2}", candle.c);
-        println!("   Volume: {:.2}", candle.v);
-        println!("   Trades: {}", candle.n);
+    // Helper method for strategy execution
+    async fn execute_strategy_logic(&mut self, closed_candle: HyperCandle, execution_price: f64, current_time: u64) {
+        println!("   Close Time: {} (Signal Time: {})", closed_candle.t, current_time);
+        println!("   Open:   ${:.2}", closed_candle.o);
+        println!("   High:   ${:.2}", closed_candle.h);
+        println!("   Low:    ${:.2}", closed_candle.l);
+        println!("   Close:  ${:.2}", closed_candle.c);
+        println!("   Volume: {:.2}", closed_candle.v);
         
-        let change_pct = ((candle.c - candle.o) / candle.o) * 100.0;
+        let change_pct = ((closed_candle.c - closed_candle.o) / closed_candle.o) * 100.0;
         let color = if change_pct > 0.0 { "🟢" } else { "🔴" };
         println!("   Change: {} {:+.2}%", color, change_pct);
 
-        // Calculer les indicateurs si on a assez de données
-        if self.candle_buffer.len() >= 50 { // Minimum pour ADX (14) + SuperTrend (10) + Bollinger (20)
-            let signal = self.strategy.update(candle.h, candle.l, candle.c);
+        if self.candle_buffer.len() >= 50 {
+            // 🛡️ KILL SWITCH CHECK (Critical Security #3)
+            {
+                let mut pm = self.position_manager.lock().await;
+                let config = crate::adaptive_strategy::AdaptiveConfig::default();
+                if let Err(e) = pm.check_safety_limits(config.max_daily_drawdown_pct, config.max_trades_per_hour) {
+                    eprintln!("\n{}", e);
+                    if let Some(bot) = &self.telegram {
+                        let _ = bot.send_default_message_with_menu_btn(&e).await;
+                    }
+                    // Stop processing this candle to prevent new orders
+                    return;
+                }
+            }
+
+            // Mise à jour des indicateurs avec la bougie fermée
+            let signal = self.strategy.update(closed_candle.h, closed_candle.l, closed_candle.c);
             
-            println!("\n📊 STRATEGY ANALYSIS:");
-            self.display_indicators(Some(candle.c));
+            println!("\n📊 STRATEGY ANALYSIS (Closed Candle):");
+            self.display_indicators(Some(closed_candle.c));
             
             // Mettre à jour le P&L actuel si position ouverte
             {
                 let mut pm = self.position_manager.lock().await;
-                pm.update_current_pnl(candle.c);
+                pm.update_current_pnl(closed_candle.c);
             }
             
             // Traiter les signaux de trading
-            self.handle_trading_signal(signal, candle.c, candle.t).await;
+            self.handle_trading_signal(signal, execution_price, current_time).await;
             
             // Afficher l'état de la position
             self.display_position_status().await;
         } else {
             println!("\n⏳ Warming up indicators... ({}/50 candles)", self.candle_buffer.len());
         }
-        
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    }
+
+    /// Traite une bougie reçue et génère des signaux UNIQUEMENT à la clôture
+    async fn process_candle(&mut self, candle: HyperCandle, count: usize, force_close: bool) {
+        let last_candle_time = self.candle_buffer.back().map(|c| c.t);
+
+        // Cas spécial: Force Close (via Watchdog)
+        if force_close {
+            // On met à jour le buffer avec cette bougie finale
+            if let Some(last_t) = last_candle_time {
+                if candle.t == last_t {
+                    self.candle_buffer.pop_back();
+                }
+            }
+            self.candle_buffer.push_back(candle.clone());
+            
+            // Si cette bougie n'a pas encore été traitée comme "fermée"
+            if candle.t > self.last_processed_candle_t {
+                println!("\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                println!("🕯️  CANDLE FORCE CLOSED (Watchdog) - {} {}", candle.s, self.interval);
+                // Use Close as execution price since we don't have next Open
+                self.execute_strategy_logic(candle.clone(), candle.c, candle.t).await; 
+                self.last_processed_candle_t = candle.t;
+                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+            }
+            return;
+        }
+
+        if let Some(last_t) = last_candle_time {
+            if candle.t == last_t {
+                // 🔄 UPDATE: La bougie est en cours de formation (même timestamp)
+                // On met à jour la dernière bougie du buffer sans déclencher la stratégie
+                self.candle_buffer.pop_back();
+                self.candle_buffer.push_back(candle.clone());
+                
+                // Affichage discret pour le suivi live
+                print!("\r⏳ Candle Update: ${:.2} (H: {:.2} L: {:.2})", candle.c, candle.h, candle.l);
+                use std::io::Write;
+                std::io::stdout().flush().unwrap();
+                
+            } else if candle.t > last_t {
+                // 🏁 CLÔTURE: Une nouvelle bougie commence, la précédente est terminée
+                // IMPORTANT: La bougie 'candle' est la NOUVELLE bougie (t+1)
+                // La bougie qui vient de fermer est la dernière du buffer (t)
+                
+                println!("\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                println!("🕯️  CANDLE CLOSED - {} {}", candle.s, self.interval);
+                
+                // Récupérer la bougie qui vient de fermer (la dernière du buffer)
+                let closed_candle = self.candle_buffer.back().unwrap().clone();
+                
+                // Vérification de latence
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                let latency = now.saturating_sub(candle.t); // Différence entre maintenant et le début de la nouvelle bougie
+                if latency > 5000 {
+                    println!("⚠️  WARNING: High Latency detected! Candle closed {}ms ago.", latency);
+                }
+
+                println!("   Close Time: {} (New Open: {})", closed_candle.t, candle.t);
+                
+                if closed_candle.t > self.last_processed_candle_t {
+                    // Use Open of new candle as execution price
+                    self.execute_strategy_logic(closed_candle.clone(), candle.o, candle.t).await;
+                    self.last_processed_candle_t = closed_candle.t;
+                } else {
+                    println!("⚠️  Candle {} already processed. Skipping strategy execution.", closed_candle.t);
+                }
+                
+                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+
+                // Ajouter la NOUVELLE bougie au buffer
+                self.candle_buffer.push_back(candle.clone());
+                if self.candle_buffer.len() > CANDLE_BUFFER_SIZE {
+                    self.candle_buffer.pop_front();
+                }
+            }
+        } else {
+            // Premier ajout (Buffer vide)
+            self.candle_buffer.push_back(candle);
+        }
     }
 
     /// Traite les signaux de trading et exécute les ordres (simulés en DRY RUN)
@@ -399,7 +563,7 @@ impl HyperliquidFeed {
                             if let Some(trader) = &self.trader {
                                 println!("🚀 EXECUTING LIVE ORDER...");
                                 // Use Market Order (Limit with 5% slippage)
-                                match trader.place_market_order(&self.coin, true, position.position_size, current_price, 0.05).await {
+                                match trader.place_market_order_with_retry(&self.coin, true, position.position_size, current_price, 0.05, 3).await {
                                     Ok(oid) => {
                                         println!("✅ LIVE ORDER PLACED: OID {}", oid);
                                         
@@ -461,6 +625,33 @@ impl HyperliquidFeed {
                         println!("   Value:      ${:.2}", position.position_value);
                         println!("   SL Price:   ${:.2} (-1%)", position.stop_loss_price);
                         println!("   Available:  ${:.2}", pm.bankroll.available_balance);
+
+                        // 💾 Save to Supabase
+                        let supabase_client = pm.supabase.clone();
+                        if let Some(client) = supabase_client {
+                            let db_pos = crate::supabase::DbPosition {
+                                id: None,
+                                coin: self.coin.clone(),
+                                side: "LONG".to_string(),
+                                entry_price: position.entry_price,
+                                size: position.position_size,
+                                status: "OPEN".to_string(),
+                                created_at: None,
+                                closed_at: None,
+                                exit_price: None,
+                                pnl: None,
+                            };
+                            
+                            match client.save_position(&db_pos).await {
+                                Ok(id) => {
+                                    if let Some(pos) = &mut pm.position {
+                                        pos.db_id = Some(id);
+                                    }
+                                    println!("✅ Position saved to Supabase (ID: {})", id);
+                                },
+                                Err(e) => eprintln!("❌ Failed to save position to Supabase: {}", e),
+                            }
+                        }
                     }
                 }
             }
@@ -490,7 +681,7 @@ impl HyperliquidFeed {
                             if let Some(trader) = &self.trader {
                                 println!("🚀 EXECUTING LIVE ORDER...");
                                 // Use Market Order to close position
-                                match trader.place_market_order(&self.coin, false, closed.position_size, current_price, 0.05).await {
+                                match trader.place_market_order_with_retry(&self.coin, false, closed.position_size, current_price, 0.05, 10).await {
                                     Ok(oid) => {
                                         println!("✅ LIVE ORDER PLACED: OID {}", oid);
                                         
@@ -554,7 +745,29 @@ impl HyperliquidFeed {
                         println!("   Net P&L:    ${:+.2}", final_net_pnl);
                         println!("   Balance:    ${:.2}", pm.bankroll.total_balance);
                         
-                        // 📱 Telegram Notification
+                        // � Update Supabase
+                        if let Some(id) = closed.db_id {
+                            let supabase_client = pm.supabase.clone();
+                            if let Some(client) = supabase_client {
+                                let update = crate::supabase::DbPosition {
+                                    id: Some(id),
+                                    coin: self.coin.clone(),
+                                    side: "LONG".to_string(),
+                                    entry_price: closed.entry_price,
+                                    size: closed.position_size,
+                                    status: "CLOSED".to_string(),
+                                    created_at: None,
+                                    closed_at: Some(chrono::Utc::now()),
+                                    exit_price: Some(final_exit_price),
+                                    pnl: Some(final_net_pnl),
+                                };
+                                
+                                let _ = client.update_position(id, &update).await;
+                                println!("✅ Position updated in Supabase (ID: {})", id);
+                            }
+                        }
+
+                        // �📱 Telegram Notification
                         if let Some(telegram) = &self.telegram {
                             let pnl_emoji = if final_net_pnl >= 0.0 { "🟢" } else { "🔴" };
                             let pnl_type = if is_real_data { "Real" } else { "Est" };
@@ -648,6 +861,33 @@ impl HyperliquidFeed {
                         println!("   Value:      ${:.2}", position.position_value);
                         println!("   SL Price:   ${:.2} (+1%)", position.stop_loss_price);
                         println!("   Available:  ${:.2}", pm.bankroll.available_balance);
+
+                        // 💾 Save to Supabase
+                        let supabase_client = pm.supabase.clone();
+                        if let Some(client) = supabase_client {
+                            let db_pos = crate::supabase::DbPosition {
+                                id: None,
+                                coin: self.coin.clone(),
+                                side: "SHORT".to_string(),
+                                entry_price: position.entry_price,
+                                size: position.position_size,
+                                status: "OPEN".to_string(),
+                                created_at: None,
+                                closed_at: None,
+                                exit_price: None,
+                                pnl: None,
+                            };
+                            
+                            match client.save_position(&db_pos).await {
+                                Ok(id) => {
+                                    if let Some(pos) = &mut pm.position {
+                                        pos.db_id = Some(id);
+                                    }
+                                    println!("✅ Position saved to Supabase (ID: {})", id);
+                                },
+                                Err(e) => eprintln!("❌ Failed to save position to Supabase: {}", e),
+                            }
+                        }
                     }
                 }
             }
@@ -739,7 +979,29 @@ impl HyperliquidFeed {
                         println!("   Net P&L:    ${:+.2}", final_net_pnl);
                         println!("   Balance:    ${:.2}", pm.bankroll.total_balance);
                         
-                        // 📱 Telegram Notification
+                        // � Update Supabase
+                        if let Some(id) = closed.db_id {
+                            let supabase_client = pm.supabase.clone();
+                            if let Some(client) = supabase_client {
+                                let update = crate::supabase::DbPosition {
+                                    id: Some(id),
+                                    coin: self.coin.clone(),
+                                    side: "SHORT".to_string(),
+                                    entry_price: closed.entry_price,
+                                    size: closed.position_size,
+                                    status: "CLOSED".to_string(),
+                                    created_at: None,
+                                    closed_at: Some(chrono::Utc::now()),
+                                    exit_price: Some(final_exit_price),
+                                    pnl: Some(final_net_pnl),
+                                };
+                                
+                                let _ = client.update_position(id, &update).await;
+                                println!("✅ Position updated in Supabase (ID: {})", id);
+                            }
+                        }
+
+                        // �📱 Telegram Notification
                         if let Some(telegram) = &self.telegram {
                             let pnl_emoji = if final_net_pnl >= 0.0 { "🟢" } else { "🔴" };
                             let pnl_type = if is_real_data { "Real" } else { "Est" };
@@ -868,16 +1130,130 @@ pub async fn run_live_trading() -> Result<(), Box<dyn std::error::Error>> {
     let is_live = std::env::var("LIVE_TRADING").unwrap_or_else(|_| "false".to_string()) == "true";
     let is_running = Arc::new(AtomicBool::new(true)); // Shared state across reconnections
     
+    // Initialize Supabase
+    let supabase = crate::supabase::SupabaseClient::new();
+    if supabase.is_some() {
+        println!("✅ Supabase Logging Enabled");
+    } else {
+        println!("⚠️  Supabase Logging Disabled (Missing SUPABASE_URL or SUPABASE_KEY)");
+    }
+
+    // Initialize shared resources
+    let position_manager = Arc::new(Mutex::new(crate::position_manager::PositionManager::new(INITIAL_BANKROLL_USDC, supabase.clone())));
+    
+    // Load existing positions from Supabase
+    {
+        let mut pm = position_manager.lock().await;
+        pm.init().await;
+    }
+
+    let telegram = crate::telegram::TelegramBot::new();
+
+    // Handle Shutdown Signal
+    let ir_signal = is_running.clone();
+    let tg_signal = telegram.clone();
+    let sb_signal = supabase.clone();
+    
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        let mut sig_term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+        #[cfg(unix)]
+        let mut sig_hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()).unwrap();
+
+        #[cfg(unix)]
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                println!("\n🛑 Shutdown signal (Ctrl+C) received.");
+            }
+            _ = sig_term.recv() => {
+                println!("\n🛑 Shutdown signal (SIGTERM) received.");
+            }
+            _ = sig_hup.recv() => {
+                println!("\n🛑 Shutdown signal (SIGHUP) received.");
+            }
+        }
+
+        #[cfg(not(unix))]
+        let _ = tokio::signal::ctrl_c().await;
+
+        println!("Stopping bot...");
+        ir_signal.store(false, Ordering::SeqCst);
+        
+        if let Some(bot) = tg_signal {
+            let _ = bot.send_message("🛑 *Bot Stopping* - Shutdown signal received.").await;
+        }
+        
+        if let Some(client) = sb_signal {
+            let _ = client.log("INFO", "Bot stopping - Shutdown signal", None).await;
+        }
+    });
+
+    // Start Telegram Listener ONCE
+    if let Some(bot) = telegram.clone() {
+        let pm = position_manager.clone();
+        let ir = is_running.clone();
+        println!("📱 Starting Telegram Listener (Background Task)...");
+        
+        // Send Startup Message
+        let _ = bot.send_default_message_with_menu_btn("🟢 *Bot Connected* - System Online").await;
+
+        tokio::spawn(async move {
+            bot.run_listener(ir, pm).await;
+        });
+    }
+
     loop {
+        if !is_running.load(Ordering::SeqCst) {
+            println!("🛑 Bot stopped. Exiting main loop.");
+            break Ok(());
+        }
+
         println!("\n🔄 Starting trading loop...");
-        let mut feed = HyperliquidFeed::new(COIN.to_string(), CANDLE_INTERVAL.to_string(), is_live, is_running.clone());
+        let mut feed = HyperliquidFeed::new(
+            COIN.to_string(), 
+            CANDLE_INTERVAL.to_string(), 
+            is_live, 
+            is_running.clone(),
+            position_manager.clone(),
+            telegram.clone()
+        );
+
+        // 1. SYNC STATE (Critical Security #1)
+        if is_live {
+            if let Some(trader) = &feed.trader {
+                println!("🔄 Checking for existing positions on Hyperliquid...");
+                match trader.get_open_positions().await {
+                    Ok(positions) => {
+                        let mut pm = position_manager.lock().await;
+                        for (coin, size, entry_px, side) in positions {
+                            if coin == COIN {
+                                pm.sync_position(&coin, size, entry_px, &side);
+                            }
+                        }
+                    },
+                    Err(e) => eprintln!("⚠️ Failed to sync positions: {}", e),
+                }
+            }
+        }
         
         if let Err(e) = feed.connect_and_trade().await {
             eprintln!("❌ Trading loop error: {}", e);
+            
+            // Notify Disconnection
+            if let Some(bot) = &telegram {
+                let _ = bot.send_default_message_with_menu_btn(&format!("⚠️ *Bot Disconnected* - Error: {}\nReconnecting in 5s...", e)).await;
+            }
+
             eprintln!("⏳ Retrying in 5 seconds...");
             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
         } else {
             println!("⚠️ Connection closed cleanly. Reconnecting...");
+            
+            // Notify Clean Disconnection
+            if let Some(bot) = &telegram {
+                let _ = bot.send_default_message_with_menu_btn("⚠️ *Bot Disconnected* - Connection closed cleanly.\nReconnecting...").await;
+            }
+
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
     }

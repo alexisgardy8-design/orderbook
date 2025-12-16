@@ -340,6 +340,10 @@ pub struct AdaptiveConfig {
     // ADX (Regime Detection)
     pub adx_period: usize,
     pub adx_threshold: f64,    // < threshold = Range, >= threshold = Trend
+
+    // Safety / Kill Switch
+    pub max_daily_drawdown_pct: f64, // e.g. 5.0 for 5%
+    pub max_trades_per_hour: usize,  // e.g. 5
 }
 
 impl Default for AdaptiveConfig {
@@ -352,10 +356,13 @@ impl Default for AdaptiveConfig {
             st_period: 10,
             st_multiplier: 3.0,
             adx_period: 14,
-            adx_threshold: 25.0,
+            adx_threshold: 20.0,
+            max_daily_drawdown_pct: 100.0, // Désactivé (100% autorisé)
+            max_trades_per_hour: 5,        // Stop if > 5 trades/hour (algo going crazy)
         }
     }
 }
+
 
 /// Stratégie Adaptative complète
 pub struct AdaptiveStrategy {

@@ -15,6 +15,9 @@ mod position_manager;
 mod order_executor;
 
 #[cfg(feature = "websocket")]
+mod supabase;
+
+#[cfg(feature = "websocket")]
 mod telegram;
 
 #[cfg(feature = "websocket")]
@@ -87,6 +90,31 @@ fn main() {
                 });
             }
             #[cfg(feature = "websocket")]
+            "test-supabase" => {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async {
+                    println!("🗄️ Testing Supabase Connection...");
+                    if let Some(client) = supabase::SupabaseClient::new() {
+                        println!("✅ Supabase Client initialized.");
+                        
+                        // Test Log
+                        match client.log("INFO", "Test connection from CLI", Some("test-supabase")).await {
+                            Ok(_) => println!("✅ Log entry created successfully."),
+                            Err(e) => eprintln!("❌ Failed to create log: {}", e),
+                        }
+
+                        // Test Fetch Positions
+                        match client.fetch_open_positions().await {
+                            Ok(positions) => println!("✅ Fetched {} open positions.", positions.len()),
+                            Err(e) => eprintln!("❌ Failed to fetch positions: {}", e),
+                        }
+
+                    } else {
+                        eprintln!("❌ Supabase not configured. Check .env file (SUPABASE_URL, SUPABASE_KEY).");
+                    }
+                });
+            }
+            #[cfg(feature = "websocket")]
             "test-telegram" => {
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 rt.block_on(async {
@@ -110,7 +138,7 @@ fn main() {
                         // 3. Start Listener for interaction
                         println!("👂 Starting Listener for button clicks (Press Ctrl+C to stop)...");
                         let is_running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-                        let position_manager = std::sync::Arc::new(tokio::sync::Mutex::new(position_manager::PositionManager::new(1000.0)));
+                        let position_manager = std::sync::Arc::new(tokio::sync::Mutex::new(position_manager::PositionManager::new(1000.0, None)));
                         bot.run_listener(is_running, position_manager).await;
 
                     } else {

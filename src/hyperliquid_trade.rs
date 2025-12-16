@@ -245,6 +245,72 @@ impl HyperliquidTrader {
         Err("Failed to parse account balance".into())
     }
 
+    /// Fetch open positions (Sync State)
+    /// Returns Vec<(coin, size, entry_price, side)>
+    pub async fn get_open_positions(&self) -> Result<Vec<(String, f64, f64, String)>, Box<dyn std::error::Error>> {
+        let client = reqwest::Client::new();
+        let response = client
+            .post("https://api.hyperliquid.xyz/info")
+            .json(&json!({
+                "type": "clearinghouseState",
+                "user": self.wallet_address
+            }))
+            .send()
+            .await?
+            .json::<serde_json::Value>()
+            .await?;
+
+        let mut positions = Vec::new();
+
+        if let Some(asset_positions) = response.get("assetPositions") {
+            if let Some(list) = asset_positions.as_array() {
+                for item in list {
+                    if let Some(pos) = item.get("position") {
+                        let coin = pos["coin"].as_str().unwrap_or("Unknown").to_string();
+                        let szi_str = pos["szi"].as_str().unwrap_or("0");
+                        let entry_px_str = pos["entryPx"].as_str().unwrap_or("0");
+                        
+                        let szi = szi_str.parse::<f64>().unwrap_or(0.0);
+                        let entry_px = entry_px_str.parse::<f64>().unwrap_or(0.0);
+
+                        if szi != 0.0 {
+                            let side = if szi > 0.0 { "Long" } else { "Short" };
+                            positions.push((coin, szi, entry_px, side.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok(positions)
+    }
+
+    /// Place limit order with Exponential Backoff Retry
+    pub async fn place_limit_order_with_retry(
+        &self,
+        coin: &str,
+        is_buy: bool,
+        px: f64,
+        sz: f64,
+        max_retries: u32,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        let mut attempt = 0;
+        loop {
+            match self.place_limit_order(coin, is_buy, px, sz).await {
+                Ok(oid) => return Ok(oid),
+                Err(e) => {
+                    attempt += 1;
+                    if attempt >= max_retries {
+                        return Err(e);
+                    }
+                    let delay = 2u64.pow(attempt); // 2s, 4s, 8s...
+                    eprintln!("⚠️ Order failed (attempt {}/{}): {}. Retrying in {}s...", attempt, max_retries, e, delay);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(delay)).await;
+                }
+            }
+        }
+    }
+
     /// Fetch user fills (trade history)
     pub async fn get_user_fills(&self) -> Result<Vec<Fill>, Box<dyn std::error::Error>> {
         let client = reqwest::Client::new();
@@ -729,5 +795,32 @@ impl HyperliquidTrader {
         // For now, reusing place_limit_order which uses Gtc is fine for "Market" behavior if price is crossing.
         
         self.place_limit_order(coin, is_buy, aggressive_price, sz).await
+    }
+
+    /// Place Market Order with Retry
+    pub async fn place_market_order_with_retry(
+        &self,
+        coin: &str,
+        is_buy: bool,
+        sz: f64,
+        current_price: f64,
+        slippage_pct: f64,
+        max_retries: u32,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        let mut attempt = 0;
+        loop {
+            match self.place_market_order(coin, is_buy, sz, current_price, slippage_pct).await {
+                Ok(oid) => return Ok(oid),
+                Err(e) => {
+                    attempt += 1;
+                    if attempt >= max_retries {
+                        return Err(e);
+                    }
+                    let delay = 2u64.pow(attempt);
+                    eprintln!("⚠️ Market Order failed (attempt {}/{}): {}. Retrying in {}s...", attempt, max_retries, e, delay);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(delay)).await;
+                }
+            }
+        }
     }
 }

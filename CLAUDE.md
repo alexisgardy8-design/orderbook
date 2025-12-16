@@ -1,6 +1,6 @@
 # 🚀 Hyperliquid Trading Bot - Documentation Technique
 
-**Version:** 1.0.0  
+**Version:** 1.1.0  
 **Langage:** Rust (Edition 2024)  
 **Date:** Février 2025  
 **Objectif:** Bot de trading Adaptive Bidirectionnel avec LIVE TRADING sur Hyperliquid DEX:
@@ -9,11 +9,14 @@
   - Récupération historique: API REST (jusqu'à 2 ans de données via pagination)
   - **Warmup Automatique**: Pré-chargement de 100 bougies historiques au démarrage pour initialiser les indicateurs
   - Stratégie: ADX + SuperTrend + Bollinger (Long + Short)
-  - **NOUVEAU: Exécution d'ordres RÉELS sur Mainnet (EIP-712 Signing)**
-  - **NOUVEAU: Position Management avec Risk Management (1% SL, Levier 5x, 100% Exposure)**
-  - **NOUVEAU: Real-time P&L tracking avec estimation des frais (Net PnL)**
-  - **NOUVEAU: Notifications Telegram en temps réel (Trade Open/Close, PnL)** 📱
-  - **NOUVEAU: Contrôle du Bot via Telegram (Start/Stop/Status)** 🎮
+  - **Exécution d'ordres RÉELS sur Mainnet (EIP-712 Signing)**
+  - **Position Management avec Risk Management (1% SL, Levier 5x, 100% Exposure)**
+  - **Real-time P&L tracking avec estimation des frais (Net PnL)**
+  - **Notifications Telegram en temps réel (Trade Open/Close, PnL)** 📱
+  - **Contrôle du Bot via Telegram (Start/Stop/Status)** 🎮
+  - **NOUVEAU: Persistance des données via Supabase (Logs & Positions)** 🗄️
+  - **NOUVEAU: Gestion robuste des arrêts (Graceful Shutdown)** 🛑
+  - **NOUVEAU: Intégration CI/CD avec GitHub Actions** 🔄
   - Backtesting: Données réelles Hyperliquid, 208+ jours
   - **Résultat: +151.44% vs -25.31% buy & hold (+176% outperformance)** 🚀
 
@@ -30,6 +33,7 @@
 7. [Configuration Actuelle](#configuration-actuelle)
 8. [Utilisation](#utilisation)
 9. [Prochaines Étapes](#prochaines-étapes)
+10. [Infrastructure & Déploiement](#infrastructure--déploiement)
 
 ---
 
@@ -168,6 +172,7 @@ Le module `hyperliquid_trade.rs` implémente le protocole de signature complexe 
 # Testing & Data Validation
 cargo run --release test                       # 🧪 TEST API Hyperliquid + récupération données
 cargo run --release --features websocket -- test-order # 🔐 TEST LIVE ORDER (Mainnet Place/Cancel)
+cargo run --release --features websocket -- test-supabase # 🗄️ TEST SUPABASE (Connexion + Logs)
 
 # Backtesting
 cargo run --release hl-backtest                # 🚀 Backtest Adaptive Hyperliquid (208+ jours)
@@ -181,6 +186,38 @@ cargo run --release                            # Benchmark orderbook (défaut)
 cargo run --release backtest                   # Backtest arbitrage triangulaire (legacy)
 cargo run --release perf                       # Benchmark performance arbitrage (legacy)
 ```
+
+---
+
+### `supabase.rs` - Client Base de Données (NOUVEAU)
+**Responsabilités:**
+- Gestion de la persistance des données via l'API REST Supabase
+- Logging structuré des événements du bot
+- Sauvegarde et mise à jour des positions de trading
+
+**Structures:**
+```rust
+pub struct DbLog {
+    pub level: String,
+    pub message: String,
+    pub context: Option<String>,
+}
+
+pub struct DbPosition {
+    pub id: Option<i64>,
+    pub coin: String,
+    pub side: String,
+    pub entry_price: f64,
+    pub size: f64,
+    pub status: String,
+    // ... timestamps et PnL
+}
+```
+
+**Fonctionnalités:**
+- `log()`: Envoie un log asynchrone (INFO, WARN, ERROR)
+- `fetch_open_positions()`: Récupère les positions actives au démarrage (reprise sur panne)
+- `save_position()`: Sauvegarde une nouvelle position ou met à jour une existante
 
 ---
 
@@ -713,7 +750,13 @@ Reverse:  USDC → BTC → ETH → USDC
 
 ### ✅ Améliorations Récentes (Décembre 2025)
 
-1. ✅ **Contrôle Telegram Interactif**
+1. ✅ **Fetch Actif des Bougies H1 (Critical Fix)**
+   - Problème: Le WebSocket ne reçoit pas toujours de messages à chaque changement d'heure
+   - Solution: Timer qui vérifie toutes les 10s si l'heure a changé + fetch REST API
+   - Garantit que chaque bougie H1 fermée est récupérée et analysée
+   - Date: 16 déc 2025
+
+2. ✅ **Contrôle Telegram Interactif**
    - Ajout de boutons Start/Stop/Status pour contrôler le bot à distance
    - Ajout d'un bouton "Menu" pour une navigation fluide
    - Le bot répond maintenant directement à l'utilisateur qui envoie la commande
@@ -1489,16 +1532,42 @@ cargo flamegraph --features websocket -- live
    - Projet démarré comme challenge de performance d'orderbook
    - Évolué vers un bot de trading complet sur Hyperliquid
    - **Focus actuel**: Live Trading sur Hyperliquid avec notifications Telegram et gestion de position avancée
-   - **Dernière action**: Activation du Live Trading (Real Money) et ajout du bouton "Positions & PnL" sur Telegram
+   - **Dernière action**: Ajout de la persistance Supabase, Graceful Shutdown et CI/CD
 
 2. **État du code:**
    - Compilable et fonctionnel
    - **Telegram**: Module `telegram.rs` opérationnel avec menu interactif (Start/Stop/Status/Positions)
+   - **Supabase**: Module `supabase.rs` opérationnel pour logs et positions (Tables `bot_logs` et `positions`)
    - **Shared State**: Architecture `Arc<Mutex<PositionManager>>` pour partager l'état entre le trading et le bot Telegram
+   - **Graceful Shutdown**: Gestion des signaux système (Ctrl+C) pour fermer proprement les positions et notifier Telegram
    - **Real-time PnL**: Récupération des fills et fundings réels via API Hyperliquid pour reporting précis
    - **Warmup**: Récupération automatique de 100h de données historiques au démarrage
    - **Test PnL**: Commande `test-pnl` validée (calcul exact des frais et du PnL net sur un trade réel)
    - **Environment**: `.env` géré via `dotenv` (Flag `LIVE_TRADING=true` activé)
+
+---
+
+## 🏗️ Infrastructure & Déploiement
+
+### Base de Données (Supabase)
+Le projet utilise Supabase (PostgreSQL) pour la persistance.
+- **Schéma**: Voir `supabase_schema.sql`
+- **Tables**:
+  - `bot_logs`: Journaux d'exécution (INFO, WARN, ERROR)
+  - `positions`: Historique et état des positions de trading
+
+### CI/CD (GitHub Actions)
+- Workflow: `.github/workflows/ci.yml`
+- Déclencheur: Push sur `main` ou `master`
+- Actions: Build (`cargo build`) et Tests (`cargo test`)
+- Secrets requis: `SUPABASE_URL`, `SUPABASE_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `HYPERLIQUID_WALLET_ADDRESS`, `HYPERLIQUID_PRIVATE_KEY`
+
+### Déploiement Recommandé (VPS)
+- **Fournisseur**: Hetzner Cloud (Location: Ashburn, VA 🇺🇸)
+- **OS**: Ubuntu 24.04 LTS (x86)
+- **Type**: CX22 (Shared vCPU, 2 vCPU, 4GB RAM)
+- **Process Manager**: `tmux` ou `systemd` (fichier `orderbook-bot.service` fourni)
+
 
 3. **Décisions de design importantes:**
    - **Async**: Utilisation de `tokio` et `reqwest` pour les appels API

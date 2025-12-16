@@ -10,8 +10,8 @@ ExecStart=/home/alexgd/esilv/rust/orderbook-td/target/release/rust-3 trade
 Restart=always
 RestartSec=10
 Environment=RUST_LOG=info
-# Uncomment the following line to enable real trading
-# Environment=LIVE_TRADING=true
+# Enable real trading
+Environment=LIVE_TRADING=true
 
 [Install]
 WantedBy=multi-user.target

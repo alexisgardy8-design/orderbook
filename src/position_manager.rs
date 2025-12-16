@@ -2,6 +2,7 @@
 // Calcul automatique des tailles de position basé sur le risque (2% max loss)
 
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 
 /// Information sur la bankroll et les positions
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +65,7 @@ pub struct OpenPosition {
     pub unrealized_pnl: f64,          // P&L non réalisé
     pub unrealized_pnl_pct: f64,      // P&L % non réalisé
     pub entry_fee: f64,               // Frais d'entrée réels
+    pub db_id: Option<i64>,           // ID Supabase
 }
 
 impl OpenPosition {
@@ -88,6 +90,7 @@ impl OpenPosition {
             unrealized_pnl: 0.0,
             unrealized_pnl_pct: 0.0,
             entry_fee: 0.0,
+            db_id: None,
         }
     }
 
@@ -112,6 +115,7 @@ impl OpenPosition {
             unrealized_pnl: 0.0,
             unrealized_pnl_pct: 0.0,
             entry_fee: 0.0,
+            db_id: None,
         }
     }
 
@@ -164,6 +168,10 @@ pub struct PositionManager {
     pub bankroll: BankrollInfo,
     pub position: Option<OpenPosition>,
     pub closed_trades: Vec<ClosedTrade>,
+    pub trade_timestamps: VecDeque<u64>, // Pour limiter la fréquence (Kill Switch)
+    pub initial_balance_session: f64,    // Pour limiter le drawdown (Kill Switch)
+    #[cfg(feature = "websocket")]
+    pub supabase: Option<crate::supabase::SupabaseClient>,
 }
 
 #[derive(Debug, Clone)]
@@ -176,15 +184,138 @@ pub struct ClosedTrade {
     pub entry_time: u64,
     pub exit_time: u64,
     pub trade_type: String, // "Long" or "Short"
+    pub db_id: Option<i64>,
 }
 
 impl PositionManager {
+    #[cfg(feature = "websocket")]
+    pub fn new(bankroll: f64, supabase: Option<crate::supabase::SupabaseClient>) -> Self {
+        Self {
+            bankroll: BankrollInfo::new(bankroll),
+            position: None,
+            closed_trades: Vec::new(),
+            trade_timestamps: VecDeque::new(),
+            initial_balance_session: bankroll,
+            supabase,
+        }
+    }
+
+    #[cfg(not(feature = "websocket"))]
     pub fn new(bankroll: f64) -> Self {
         Self {
             bankroll: BankrollInfo::new(bankroll),
             position: None,
             closed_trades: Vec::new(),
+            trade_timestamps: VecDeque::new(),
+            initial_balance_session: bankroll,
         }
+    }
+
+    #[cfg(feature = "websocket")]
+    pub async fn init(&mut self) {
+        if let Some(client) = &self.supabase {
+            println!("🔄 Syncing positions from Supabase...");
+            if let Ok(positions) = client.fetch_open_positions().await {
+                if let Some(db_pos) = positions.first() {
+                    println!("✅ Found open position in DB: {} {}", db_pos.side, db_pos.coin);
+                    
+                    let state = if db_pos.side == "LONG" { PositionState::Long } else { PositionState::Short };
+                    let stop_loss_pct = 1.0; // Default assumption if not stored
+                    let stop_loss_price = if state == PositionState::Long {
+                        db_pos.entry_price * 0.99
+                    } else {
+                        db_pos.entry_price * 1.01
+                    };
+
+                    self.position = Some(OpenPosition {
+                        state,
+                        entry_price: db_pos.entry_price,
+                        entry_time: db_pos.created_at.map(|d| d.timestamp_millis() as u64).unwrap_or(0),
+                        position_size: db_pos.size,
+                        position_value: db_pos.size * db_pos.entry_price,
+                        stop_loss_price,
+                        stop_loss_pct,
+                        take_profit_price: None,
+                        unrealized_pnl: 0.0,
+                        unrealized_pnl_pct: 0.0,
+                        entry_fee: 0.0,
+                        db_id: db_pos.id,
+                    });
+                } else {
+                    println!("✅ No open positions in DB.");
+                }
+            } else {
+                eprintln!("❌ Failed to fetch positions from Supabase");
+            }
+        }
+    }
+
+    /// Vérifie les limites de sécurité (Kill Switch)
+    pub fn check_safety_limits(&mut self, max_drawdown_pct: f64, max_trades_per_hour: usize) -> Result<(), String> {
+        // 1. Vérifier le Drawdown Max
+        let current_equity = self.bankroll.total_balance;
+        let drawdown_pct = ((self.initial_balance_session - current_equity) / self.initial_balance_session) * 100.0;
+        
+        if drawdown_pct > max_drawdown_pct {
+            return Err(format!(
+                "🚨 KILL SWITCH ACTIVATED: Max Drawdown Exceeded! Loss: {:.2}% (Limit: {:.2}%)",
+                drawdown_pct, max_drawdown_pct
+            ));
+        }
+
+        // 2. Vérifier la fréquence de trading (Max trades / heure)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+            
+        // Nettoyer les vieux timestamps (> 1h)
+        while let Some(&t) = self.trade_timestamps.front() {
+            if now - t > 3600 {
+                self.trade_timestamps.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        if self.trade_timestamps.len() >= max_trades_per_hour {
+            return Err(format!(
+                "🚨 KILL SWITCH ACTIVATED: Trading Frequency Exceeded! {} trades in last hour (Limit: {})",
+                self.trade_timestamps.len(), max_trades_per_hour
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Synchronise une position existante depuis l'API (Recovery)
+    pub fn sync_position(&mut self, coin: &str, amount: f64, entry_price: f64, side: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Estimer un SL large pour la sécurité (car on a perdu l'info originale)
+        // On suppose 5% de SL par défaut pour la récupération
+        let sl_price = if side == "Long" {
+            entry_price * 0.95
+        } else {
+            entry_price * 1.05
+        };
+
+        let pos = if side == "Long" {
+            OpenPosition::new_long(entry_price, now, amount.abs(), sl_price)
+        } else {
+            OpenPosition::new_short(entry_price, now, amount.abs(), sl_price)
+        };
+
+        println!("🔄 RECOVERY: Synced existing {} position on {}. Size: {}, Entry: ${}", 
+            side, coin, amount, entry_price);
+            
+        self.position = Some(pos);
+        
+        // Mettre à jour le solde disponible (on considère que l'argent est engagé)
+        // Note: C'est une approximation, l'API donnera le vrai solde dispo
     }
 
     /// Ouvre une position LONG avec gestion de risque
@@ -297,6 +428,7 @@ impl PositionManager {
                 entry_time: pos.entry_time,
                 exit_time,
                 trade_type: trade_type.to_string(),
+                db_id: pos.db_id,
             };
 
             // Restaurer la bankroll
@@ -316,6 +448,10 @@ impl PositionManager {
             self.bankroll.total_balance += closed.profit_loss;
 
             self.closed_trades.push(closed.clone());
+            
+            // Enregistrer le timestamp pour le Kill Switch (fréquence)
+            self.trade_timestamps.push_back(exit_time);
+            
             Some(closed)
         } else {
             None
