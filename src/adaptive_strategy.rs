@@ -33,12 +33,24 @@ pub enum Signal {
 }
 
 /// ADX (Average Directional Index) - Mesure la FORCE d'une tendance
+/// Implémentation fidèle à TradingView (Wilder's Smoothing / RMA)
 #[derive(Debug, Clone)]
 pub struct ADX {
     period: usize,
-    tr_values: VecDeque<f64>,
-    plus_dm_values: VecDeque<f64>,
-    minus_dm_values: VecDeque<f64>,
+    
+    // Buffers pour l'initialisation (SMA)
+    tr_buf: VecDeque<f64>,
+    plus_dm_buf: VecDeque<f64>,
+    minus_dm_buf: VecDeque<f64>,
+    dx_buf: VecDeque<f64>,
+    
+    // Valeurs lissées (RMA)
+    tr_smooth: f64,
+    plus_dm_smooth: f64,
+    minus_dm_smooth: f64,
+    adx_smooth: f64,
+    
+    // État précédent
     prev_high: Option<f64>,
     prev_low: Option<f64>,
     prev_close: Option<f64>,
@@ -48,9 +60,16 @@ impl ADX {
     pub fn new(period: usize) -> Self {
         Self {
             period,
-            tr_values: VecDeque::new(),
-            plus_dm_values: VecDeque::new(),
-            minus_dm_values: VecDeque::new(),
+            tr_buf: VecDeque::with_capacity(period),
+            plus_dm_buf: VecDeque::with_capacity(period),
+            minus_dm_buf: VecDeque::with_capacity(period),
+            dx_buf: VecDeque::with_capacity(period),
+            
+            tr_smooth: 0.0,
+            plus_dm_smooth: 0.0,
+            minus_dm_smooth: 0.0,
+            adx_smooth: 0.0,
+            
             prev_high: None,
             prev_low: None,
             prev_close: None,
@@ -72,14 +91,52 @@ impl ADX {
             let plus_dm = if up_move > down_move && up_move > 0.0 { up_move } else { 0.0 };
             let minus_dm = if down_move > up_move && down_move > 0.0 { down_move } else { 0.0 };
 
-            self.tr_values.push_back(tr);
-            self.plus_dm_values.push_back(plus_dm);
-            self.minus_dm_values.push_back(minus_dm);
+            // --- Phase 1: Initialisation TR/DM (SMA) ---
+            if self.tr_buf.len() < self.period {
+                self.tr_buf.push_back(tr);
+                self.plus_dm_buf.push_back(plus_dm);
+                self.minus_dm_buf.push_back(minus_dm);
+                
+                // Si on vient de remplir le buffer, on calcule la première SMA
+                if self.tr_buf.len() == self.period {
+                    self.tr_smooth = self.tr_buf.iter().sum::<f64>() / self.period as f64;
+                    self.plus_dm_smooth = self.plus_dm_buf.iter().sum::<f64>() / self.period as f64;
+                    self.minus_dm_smooth = self.minus_dm_buf.iter().sum::<f64>() / self.period as f64;
+                }
+            } else {
+                // --- Phase 2: Lissage Wilder (RMA) ---
+                // RMA = (Prev * (N-1) + Curr) / N
+                let alpha = 1.0 / self.period as f64;
+                self.tr_smooth = (self.tr_smooth * (1.0 - alpha)) + (tr * alpha);
+                self.plus_dm_smooth = (self.plus_dm_smooth * (1.0 - alpha)) + (plus_dm * alpha);
+                self.minus_dm_smooth = (self.minus_dm_smooth * (1.0 - alpha)) + (minus_dm * alpha);
+            }
 
-            if self.tr_values.len() > self.period {
-                self.tr_values.pop_front();
-                self.plus_dm_values.pop_front();
-                self.minus_dm_values.pop_front();
+            // Calcul du DX (si on a commencé à lisser)
+            if self.tr_buf.len() >= self.period {
+                let mut dx = 0.0;
+                if self.tr_smooth != 0.0 {
+                    let di_plus = 100.0 * (self.plus_dm_smooth / self.tr_smooth);
+                    let di_minus = 100.0 * (self.minus_dm_smooth / self.tr_smooth);
+                    let sum_di = di_plus + di_minus;
+                    if sum_di != 0.0 {
+                        dx = 100.0 * (di_plus - di_minus).abs() / sum_di;
+                    }
+                }
+
+                // --- Phase 3: Initialisation ADX (SMA du DX) ---
+                if self.dx_buf.len() < self.period {
+                    self.dx_buf.push_back(dx);
+                    
+                    if self.dx_buf.len() == self.period {
+                        self.adx_smooth = self.dx_buf.iter().sum::<f64>() / self.period as f64;
+                        // On a enfin une valeur ADX valide !
+                    }
+                } else {
+                    // --- Phase 4: Lissage ADX (RMA du DX) ---
+                    let alpha = 1.0 / self.period as f64;
+                    self.adx_smooth = (self.adx_smooth * (1.0 - alpha)) + (dx * alpha);
+                }
             }
         }
 
@@ -87,30 +144,12 @@ impl ADX {
         self.prev_low = Some(low);
         self.prev_close = Some(close);
 
-        if self.tr_values.len() < self.period {
-            return None;
+        // On ne retourne une valeur que si tout est initialisé (2 * period)
+        if self.dx_buf.len() >= self.period {
+            Some(self.adx_smooth)
+        } else {
+            None
         }
-
-        // 3. Smoothed TR et DM
-        let tr_sum: f64 = self.tr_values.iter().sum();
-        let plus_dm_sum: f64 = self.plus_dm_values.iter().sum();
-        let minus_dm_sum: f64 = self.minus_dm_values.iter().sum();
-
-        // 4. Directional Indicators
-        let di_plus = 100.0 * (plus_dm_sum / tr_sum);
-        let di_minus = 100.0 * (minus_dm_sum / tr_sum);
-
-        // 5. DX (Directional Index)
-        let dx_sum = di_plus + di_minus;
-        if dx_sum == 0.0 {
-            return Some(0.0);
-        }
-        
-        let dx = 100.0 * (di_plus - di_minus).abs() / dx_sum;
-        
-        // 6. ADX = Average of DX (simplified: instantaneous DX)
-        // Note: True Wilder's ADX uses exponential smoothing of DX
-        Some(dx)
     }
 }
 
@@ -580,13 +619,13 @@ mod tests {
     fn test_adx_calculation() {
         let mut adx = ADX::new(14);
         
-        // Warmup
-        for i in 0..20 {
+        // Warmup (Need 2 * period = 28 candles for full initialization)
+        for i in 0..30 {
             let price = 100.0 + (i as f64);
             adx.update(price + 1.0, price - 1.0, price);
         }
         
-        let result = adx.update(120.0, 118.0, 119.0);
+        let result = adx.update(131.0, 129.0, 130.0);
         assert!(result.is_some());
         assert!(result.unwrap() >= 0.0 && result.unwrap() <= 100.0);
     }
