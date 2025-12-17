@@ -204,9 +204,21 @@ impl HyperliquidFeed {
                     }
                 }
                 println!("✅ Indicators warmed up! Buffer size: {}", self.candle_buffer.len());
-                if let Some(last) = self.candle_buffer.back() {
+                
+                // FIX: On initialise last_processed_candle_t à l'avant-dernière bougie
+                // pour être sûr que si la dernière bougie du buffer est la bougie en cours (ouverte),
+                // elle sera bien traitée à sa fermeture.
+                if self.candle_buffer.len() >= 2 {
+                    let last_idx = self.candle_buffer.len() - 1;
+                    // On prend l'avant-dernière bougie comme "dernière traitée"
+                    // Comme ça, la dernière bougie (qui est peut-être en cours) sera considérée comme "nouvelle" à sa fermeture
+                    self.last_processed_candle_t = self.candle_buffer[last_idx - 1].t;
+                    println!("🔧 Last Processed Candle set to: {} (Penultimate)", self.last_processed_candle_t);
+                } else if let Some(last) = self.candle_buffer.back() {
+                    // Fallback si pas assez de bougies
                     self.last_processed_candle_t = last.t;
                 }
+
                 let last_price = self.candle_buffer.back().map(|c| c.c);
                 self.display_indicators(last_price);
 
@@ -223,7 +235,7 @@ impl HyperliquidFeed {
         }
     }
 
-    /// Connexion au WebSocket et trading live
+    /// Connexion au WebSocket et trading live (avec reconnexion automatique)
     pub async fn connect_and_trade(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         println!("\n╔════════════════════════════════════════════════════════════════╗");
         println!("║  🚀 HYPERLIQUID LIVE TRADING BOT - ADAPTIVE STRATEGY          ║");
@@ -234,7 +246,7 @@ impl HyperliquidFeed {
              let _ = telegram.send_control_keyboard(true).await;
         }
 
-        // Warmup indicators first
+        // Warmup indicators first (Une seule fois au démarrage)
         self.warmup().await;
 
         // Récupérer la bankroll de l'utilisateur
@@ -288,7 +300,33 @@ impl HyperliquidFeed {
             }
         }
 
-        println!("🌐 Connecting to Hyperliquid WebSocket...");
+        // Boucle de reconnexion infinie
+        loop {
+            println!("🌐 Connecting to Hyperliquid WebSocket...");
+            
+            match self.run_websocket_session().await {
+                Ok(_) => {
+                    println!("⚠️ WebSocket session ended normally. Reconnecting in 5s...");
+                }
+                Err(e) => {
+                    eprintln!("❌ WebSocket Error: {}. Reconnecting in 5s...", e);
+                }
+            }
+
+            // Log disconnection
+            {
+                let pm = self.position_manager.lock().await;
+                if let Some(client) = &pm.supabase {
+                    let _ = client.log("WARN", "⚠️ Bot Disconnected - Attempting Reconnect...", None).await;
+                }
+            }
+
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    }
+
+    /// Session WebSocket unique (extrait de connect_and_trade)
+    async fn run_websocket_session(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let (ws_stream, _) = connect_async(HYPERLIQUID_WS_URL).await?;
         println!("✅ Connected to {}\n", HYPERLIQUID_WS_URL);
 
@@ -406,6 +444,13 @@ impl HyperliquidFeed {
                                             if let Ok(candles) = serde_json::from_value::<Vec<HyperCandle>>(ws_msg.data) {
                                                 for candle in candles {
                                                     if candle.i == self.interval {
+                                                        // 🛡️ PROTECTION RECONNEXION
+                                                        // Si la bougie reçue est plus vieille ou égale à la dernière traitée, on l'ignore
+                                                        // SAUF si c'est la bougie en cours (t == last_processed) pour la mise à jour live
+                                                        if candle.t < self.last_processed_candle_t {
+                                                            continue;
+                                                        }
+                                                        
                                                         candle_count += 1;
                                                         self.process_candle(candle, candle_count, false).await;
                                                     } else if candle.i == "5m" {
