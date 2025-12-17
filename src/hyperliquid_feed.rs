@@ -573,8 +573,9 @@ impl HyperliquidFeed {
             return;
         }
 
-        // On vérifie si le timestamp de la bougie 5m est plus récent que la dernière bougie traitée
-        // pour éviter de traiter des vieilles données, mais on veut surtout le High/Low actuel
+        // ⚠️ IMPORTANT: On ne recalcule PAS l'ADX ni les indicateurs ici.
+        // On vérifie UNIQUEMENT si le prix touche le niveau de sortie (Milieu Bollinger H1)
+        // Cela garantit la stabilité de la stratégie (pas de sortie sur bruit 5m)
         
         // Check exit condition using the 5m candle High/Low
         if let Some(signal) = self.strategy.check_exit_condition(candle.h, candle.l, candle.c) {

@@ -76,6 +76,10 @@ pub fn run_hyperliquid_adaptive_backtest(
             Ok(v) => v,
             Err(_) => continue,
         };
+        let open = match candle.o.parse::<f64>() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
 
         // � FUNDING FEES (Deducted every hour if position is open)
         if position_size > 0.0 {
@@ -84,23 +88,22 @@ pub fn run_hyperliquid_adaptive_backtest(
             capital -= funding_cost;
         }
 
-        // 🛡️ STOP LOSS CHECK (Avant le signal de clôture)
-        if position_size > 0.0 {
-            if !is_short {
-                // LONG Position: Check Low vs SL
+        let is_bullish = close >= open;
+        let mut exited_this_candle = false;
+
+        // 🛡️ LOGIQUE D'EXÉCUTION INTRA-BOUGIE (High/Low Ordering)
+        if is_bullish {
+            // 1. Check LOW events first (SL for Long)
+            if position_size > 0.0 && !is_short {
                 let sl_price = entry_price * (1.0 - stop_loss_pct);
                 if low <= sl_price {
-                    // SL Hit!
-                    let exit_price = sl_price * (1.0 - slippage_rate); // Apply Slippage
+                    let exit_price = sl_price * (1.0 - slippage_rate);
                     let revenue = position_size * exit_price;
                     let fee = revenue * fee_rate;
                     let net_revenue = revenue - fee;
-                    
                     capital += net_revenue;
-                    
                     let profit_usd = net_revenue - (position_size * entry_price);
                     let profit_pct = (profit_usd / (position_size * entry_price)) * 100.0;
-                    
                     trades.push(Trade {
                         entry_price,
                         exit_price,
@@ -108,34 +111,26 @@ pub fn run_hyperliquid_adaptive_backtest(
                         profit_usd,
                         trade_type: format!("{} (SL)", entry_type),
                     });
-                    
                     position_size = 0.0;
                     entry_type = String::from("None");
                     is_short = false;
                     sl_hits += 1;
-                    
-                    // Skip strategy update for this candle as we just exited
-                    // But we still need to update strategy internal state? 
-                    // Yes, strategy needs to see the candle to update indicators
-                    strategy.update(high, low, close);
-                    continue; 
+                    exited_this_candle = true;
                 }
-            } else {
-                // SHORT Position: Check High vs SL
+            }
+
+            // 2. Check HIGH events second (SL for Short)
+            if !exited_this_candle && position_size > 0.0 && is_short {
                 let sl_price = entry_price * (1.0 + stop_loss_pct);
                 if high >= sl_price {
-                    // SL Hit!
-                    let exit_price = sl_price * (1.0 + slippage_rate); // Apply Slippage
+                    let exit_price = sl_price * (1.0 + slippage_rate);
                     let cost_to_cover = position_size * exit_price;
                     let fee = cost_to_cover * fee_rate;
                     let total_cost = cost_to_cover + fee;
-                    
                     let revenue = position_size * entry_price;
                     let profit_usd = revenue - total_cost;
                     let profit_pct = (profit_usd / revenue) * 100.0;
-                    
                     capital += profit_usd;
-                    
                     trades.push(Trade {
                         entry_price,
                         exit_price,
@@ -143,133 +138,105 @@ pub fn run_hyperliquid_adaptive_backtest(
                         profit_usd,
                         trade_type: format!("{} (SL)", entry_type),
                     });
-                    
                     position_size = 0.0;
                     entry_type = String::from("None");
                     is_short = false;
                     sl_hits += 1;
+                    exited_this_candle = true;
+                }
+            }
 
-                    strategy.update(high, low, close);
-                    continue;
-                }
+            // 3. Update Strategy (Checks High for TP/Signal)
+            let signal = strategy.update(high, low, close);
+            
+            if !exited_this_candle {
+                process_signal(signal, &mut position_size, &mut capital, &mut is_short, &mut entry_price, &mut entry_type, &mut trades, &mut range_trades, &mut trend_trades, &mut short_trades, &mut upgrades, fee_rate, slippage_rate, close);
             }
-        }
 
-        let signal = strategy.update(high, low, close);
-        let price = close;
+        } else {
+            // BEARISH (Open -> High -> Low -> Close)
+            
+            // 1. Check HIGH events first (SL for Short)
+            if position_size > 0.0 && is_short {
+                let sl_price = entry_price * (1.0 + stop_loss_pct);
+                if high >= sl_price {
+                    let exit_price = sl_price * (1.0 + slippage_rate);
+                    let cost_to_cover = position_size * exit_price;
+                    let fee = cost_to_cover * fee_rate;
+                    let total_cost = cost_to_cover + fee;
+                    let revenue = position_size * entry_price;
+                    let profit_usd = revenue - total_cost;
+                    let profit_pct = (profit_usd / revenue) * 100.0;
+                    capital += profit_usd;
+                    trades.push(Trade {
+                        entry_price,
+                        exit_price,
+                        profit_pct,
+                        profit_usd,
+                        trade_type: format!("{} (SL)", entry_type),
+                    });
+                    position_size = 0.0;
+                    entry_type = String::from("None");
+                    is_short = false;
+                    sl_hits += 1;
+                    exited_this_candle = true;
+                }
+            }
 
-        match signal {
-            Signal::BuyRange => {
-                if position_size == 0.0 && !is_short {
-                    let amount_to_invest = capital * 0.95;
-                    let fee = amount_to_invest * fee_rate;
-                    let cost = amount_to_invest + fee;
-                    
-                    if cost <= capital {
-                        position_size = amount_to_invest / price;
-                        capital -= cost;
-                        entry_price = price;
-                        entry_type = String::from("Range");
-                        range_trades += 1;
-                        is_short = false;
-                    }
+            // 2. Check Strategy Exit (High)
+            let signal = strategy.update(high, low, close);
+            
+            if !exited_this_candle {
+                let is_exit = match signal {
+                    Signal::SellRange | Signal::SellTrend | Signal::CoverShort => true,
+                    _ => false
+                };
+
+                if is_exit && position_size > 0.0 {
+                    process_signal(signal, &mut position_size, &mut capital, &mut is_short, &mut entry_price, &mut entry_type, &mut trades, &mut range_trades, &mut trend_trades, &mut short_trades, &mut upgrades, fee_rate, slippage_rate, close);
+                    exited_this_candle = true;
                 }
             }
-            Signal::BuyTrend => {
-                if position_size == 0.0 && !is_short {
-                    let amount_to_invest = capital * 0.95;
-                    let fee = amount_to_invest * fee_rate;
-                    let cost = amount_to_invest + fee;
-                    
-                    if cost <= capital {
-                        position_size = amount_to_invest / price;
-                        capital -= cost;
-                        entry_price = price;
-                        entry_type = String::from("Trend");
-                        trend_trades += 1;
-                        is_short = false;
-                    }
-                }
-            }
-            Signal::SellShort => {
-                // Entrée en position SHORT
-                if position_size == 0.0 && !is_short {
-                    let amount_to_invest = capital * 0.95;
-                    let fee = amount_to_invest * fee_rate;
-                    let cost = amount_to_invest + fee;
-                    
-                    if cost <= capital {
-                        position_size = amount_to_invest / price; // Quantité qu'on vend
-                        capital -= fee; // On paye les frais uniquement
-                        entry_price = price;
-                        entry_type = String::from("Short");
-                        short_trades += 1;
-                        is_short = true;
-                    }
-                }
-            }
-            Signal::SellRange | Signal::SellTrend => {
-                if position_size > 0.0 && !is_short {
-                    let exit_price = price * (1.0 - slippage_rate); // Apply Slippage
+
+            // 3. Check LOW events second (SL for Long)
+            if !exited_this_candle && position_size > 0.0 && !is_short {
+                let sl_price = entry_price * (1.0 - stop_loss_pct);
+                if low <= sl_price {
+                    let exit_price = sl_price * (1.0 - slippage_rate);
                     let revenue = position_size * exit_price;
                     let fee = revenue * fee_rate;
                     let net_revenue = revenue - fee;
-                    
                     capital += net_revenue;
-                    
                     let profit_usd = net_revenue - (position_size * entry_price);
                     let profit_pct = (profit_usd / (position_size * entry_price)) * 100.0;
-                    
                     trades.push(Trade {
                         entry_price,
                         exit_price,
                         profit_pct,
                         profit_usd,
-                        trade_type: entry_type.clone(),
+                        trade_type: format!("{} (SL)", entry_type),
                     });
-                    
                     position_size = 0.0;
                     entry_type = String::from("None");
                     is_short = false;
+                    sl_hits += 1;
+                    exited_this_candle = true;
                 }
             }
-            Signal::CoverShort => {
-                // Sortie de position SHORT (rachat)
-                if position_size > 0.0 && is_short {
-                    let exit_price = price * (1.0 + slippage_rate); // Apply Slippage
-                    let cost_to_cover = position_size * exit_price; // Coût pour racheter
-                    let fee = cost_to_cover * fee_rate;
-                    let total_cost = cost_to_cover + fee;
-                    
-                    // Profit SHORT = (prix entrée - prix sortie) * quantité
-                    let revenue = position_size * entry_price; // Ce qu'on avait vendu
-                    let profit_usd = revenue - total_cost;
-                    let profit_pct = (profit_usd / revenue) * 100.0;
-                    
-                    capital += profit_usd;
-                    
-                    trades.push(Trade {
-                        entry_price,
-                        exit_price,
-                        profit_pct,
-                        profit_usd,
-                        trade_type: entry_type.clone(),
-                    });
-                    
-                    position_size = 0.0;
-                    entry_type = String::from("None");
-                    is_short = false;
+
+            // 4. Process Entry Signals (if not exited)
+            if !exited_this_candle {
+                match signal {
+                    Signal::BuyRange | Signal::BuyTrend | Signal::SellShort | Signal::UpgradeToTrend => {
+                         process_signal(signal, &mut position_size, &mut capital, &mut is_short, &mut entry_price, &mut entry_type, &mut trades, &mut range_trades, &mut trend_trades, &mut short_trades, &mut upgrades, fee_rate, slippage_rate, close);
+                    },
+                    _ => {}
                 }
-            }
-            Signal::UpgradeToTrend => {
-                // Transformation Range -> Trend (on garde la position)
-                entry_type = String::from("Trend");
-                upgrades += 1;
-            }
-            Signal::Hold => {
-                // Ne rien faire
             }
         }
+
+        // Strategy updated in logic block above
+        let price = close;
 
         // Calcul de la valeur du portfolio (BIDIRECTIONNEL)
         let portfolio_value = if is_short {
@@ -605,4 +572,128 @@ pub fn run_hyperliquid_backtest() {
     
     println!("\n✅ Hyperliquid backtest completed.");
     println!("📌 Ready for live trading deployment!\n");
+}
+
+fn process_signal(
+    signal: Signal,
+    position_size: &mut f64,
+    capital: &mut f64,
+    is_short: &mut bool,
+    entry_price: &mut f64,
+    entry_type: &mut String,
+    trades: &mut Vec<Trade>,
+    range_trades: &mut i32,
+    trend_trades: &mut i32,
+    short_trades: &mut i32,
+    upgrades: &mut i32,
+    fee_rate: f64,
+    slippage_rate: f64,
+    price: f64,
+) {
+    match signal {
+        Signal::BuyRange => {
+            if *position_size == 0.0 && !*is_short {
+                let amount_to_invest = *capital * 0.95;
+                let fee = amount_to_invest * fee_rate;
+                let cost = amount_to_invest + fee;
+                
+                if cost <= *capital {
+                    *position_size = amount_to_invest / price;
+                    *capital -= cost;
+                    *entry_price = price;
+                    *entry_type = String::from("Range");
+                    *range_trades += 1;
+                    *is_short = false;
+                }
+            }
+        }
+        Signal::BuyTrend => {
+            if *position_size == 0.0 && !*is_short {
+                let amount_to_invest = *capital * 0.95;
+                let fee = amount_to_invest * fee_rate;
+                let cost = amount_to_invest + fee;
+                
+                if cost <= *capital {
+                    *position_size = amount_to_invest / price;
+                    *capital -= cost;
+                    *entry_price = price;
+                    *entry_type = String::from("Trend");
+                    *trend_trades += 1;
+                    *is_short = false;
+                }
+            }
+        }
+        Signal::SellShort => {
+            if *position_size == 0.0 && !*is_short {
+                let amount_to_invest = *capital * 0.95;
+                let fee = amount_to_invest * fee_rate;
+                let cost = amount_to_invest + fee;
+                
+                if cost <= *capital {
+                    *position_size = amount_to_invest / price;
+                    *capital -= fee;
+                    *entry_price = price;
+                    *entry_type = String::from("Short");
+                    *short_trades += 1;
+                    *is_short = true;
+                }
+            }
+        }
+        Signal::SellRange | Signal::SellTrend => {
+            if *position_size > 0.0 && !*is_short {
+                let exit_price = price * (1.0 - slippage_rate);
+                let revenue = *position_size * exit_price;
+                let fee = revenue * fee_rate;
+                let net_revenue = revenue - fee;
+                
+                *capital += net_revenue;
+                
+                let profit_usd = net_revenue - (*position_size * *entry_price);
+                let profit_pct = (profit_usd / (*position_size * *entry_price)) * 100.0;
+                
+                trades.push(Trade {
+                    entry_price: *entry_price,
+                    exit_price,
+                    profit_pct,
+                    profit_usd,
+                    trade_type: entry_type.clone(),
+                });
+                
+                *position_size = 0.0;
+                *entry_type = String::from("None");
+                *is_short = false;
+            }
+        }
+        Signal::CoverShort => {
+            if *position_size > 0.0 && *is_short {
+                let exit_price = price * (1.0 + slippage_rate);
+                let cost_to_cover = *position_size * exit_price;
+                let fee = cost_to_cover * fee_rate;
+                let total_cost = cost_to_cover + fee;
+                
+                let revenue = *position_size * *entry_price;
+                let profit_usd = revenue - total_cost;
+                let profit_pct = (profit_usd / revenue) * 100.0;
+                
+                *capital += profit_usd;
+                
+                trades.push(Trade {
+                    entry_price: *entry_price,
+                    exit_price,
+                    profit_pct,
+                    profit_usd,
+                    trade_type: entry_type.clone(),
+                });
+                
+                *position_size = 0.0;
+                *entry_type = String::from("None");
+                *is_short = false;
+            }
+        }
+        Signal::UpgradeToTrend => {
+            *entry_type = String::from("Trend");
+            *upgrades += 1;
+        }
+        Signal::Hold => {}
+    }
 }
