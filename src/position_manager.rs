@@ -183,6 +183,7 @@ pub struct PositionManager {
     pub last_rsi: f64,
     pub last_regime: String,
     pub last_bollinger: Option<(f64, f64, f64)>,
+    pub last_supertrend: String,
 }
 
 #[derive(Debug, Clone)]
@@ -212,6 +213,7 @@ impl PositionManager {
             last_rsi: 50.0,
             last_regime: "Unknown".to_string(),
             last_bollinger: None,
+            last_supertrend: "Unknown".to_string(),
         }
     }
 
@@ -227,6 +229,7 @@ impl PositionManager {
             last_rsi: 50.0,
             last_regime: "Unknown".to_string(),
             last_bollinger: None,
+            last_supertrend: "Unknown".to_string(),
         }
     }
 

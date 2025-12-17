@@ -598,6 +598,10 @@ impl AdaptiveStrategy {
         self.current_regime
     }
 
+    pub fn get_supertrend_status(&self) -> bool {
+        self.supertrend.get_trend()
+    }
+
     pub fn get_adx_value(&self) -> f64 {
         self.last_adx
     }

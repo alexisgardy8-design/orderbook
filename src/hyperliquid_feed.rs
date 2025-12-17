@@ -535,6 +535,7 @@ impl HyperliquidFeed {
                 pm.last_rsi = self.strategy.get_rsi_value();
                 pm.last_regime = format!("{:?}", self.strategy.get_current_regime());
                 pm.last_bollinger = self.strategy.get_bollinger_bands();
+                pm.last_supertrend = if self.strategy.get_supertrend_status() { "🟢 BULLISH".to_string() } else { "🔴 BEARISH".to_string() };
             }
 
             // 📝 Log to Supabase
