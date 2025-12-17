@@ -156,7 +156,7 @@ impl HyperliquidFeed {
     }
 
     /// Récupère les données historiques pour chauffer les indicateurs
-    async fn warmup(&mut self) {
+    pub async fn warmup(&mut self) {
         println!("🔥 Warming up indicators with historical data...");
         
         let end_time = std::time::SystemTime::now()
@@ -226,8 +226,10 @@ impl HyperliquidFeed {
                 {
                     let mut pm = self.position_manager.lock().await;
                     pm.last_adx = self.strategy.get_adx_value();
+                    pm.last_rsi = self.strategy.get_rsi_value();
                     pm.last_regime = format!("{:?}", self.strategy.get_current_regime());
                     pm.last_bollinger = self.strategy.get_bollinger_bands();
+                    pm.last_supertrend = if self.strategy.get_supertrend_status() { "🟢 BULLISH".to_string() } else { "🔴 BEARISH".to_string() };
                 }
             },
             Ok(Err(e)) => eprintln!("❌ Failed to fetch historical data: {}", e),
@@ -1418,6 +1420,9 @@ pub async fn run_live_trading() -> Result<(), Box<dyn std::error::Error>> {
             position_manager.clone(),
             telegram.clone()
         );
+
+        // Warmup strategy
+        feed.warmup().await;
 
         // 1. SYNC STATE (Critical Security #1)
         if is_live {
