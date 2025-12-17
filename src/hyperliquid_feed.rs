@@ -59,7 +59,7 @@ pub struct HyperliquidFeed {
     strategy: crate::adaptive_strategy::AdaptiveStrategy,
     position_manager: Arc<Mutex<crate::position_manager::PositionManager>>,
     order_simulator: crate::order_executor::OrderSimulator,
-    pub trader: Option<HyperliquidTrader>,
+    pub trader: Option<Arc<HyperliquidTrader>>,
     is_live: bool,
     telegram: Option<crate::telegram::TelegramBot>,
     is_running: Arc<AtomicBool>,
@@ -97,7 +97,7 @@ impl HyperliquidFeed {
                 } else {
                     println!("ℹ️  Hyperliquid Connection Active (Read-Only) - Wallet: {}", t.wallet_address);
                 }
-                Some(t)
+                Some(Arc::new(t))
             },
             Err(e) => {
                 if is_live {
@@ -711,65 +711,6 @@ impl HyperliquidFeed {
                     
                     if let Some(mut position) = pm.open_long(current_price, current_time, stop_loss_price) {
                         
-                        if self.is_live {
-                            if let Some(trader) = &self.trader {
-                                println!("🚀 EXECUTING LIVE ORDER...");
-                                // Use Market Order (Limit with 5% slippage)
-                                match trader.place_market_order_with_retry(&self.coin, true, position.position_size, current_price, 0.05, 3).await {
-                                    Ok(oid) => {
-                                        println!("✅ LIVE ORDER PLACED: OID {}", oid);
-                                        
-                                        // Wait for fill to get real price
-                                        println!("⏳ Waiting for fill details...");
-                                        sleep(Duration::from_secs(2)).await;
-                                        
-                                        // Fetch real fill data
-                                        if let Ok(fills) = trader.get_user_fills().await {
-                                            // Find the fill for this order (approximate by time and coin)
-                                            let recent_fill = fills.iter().find(|f| 
-                                                f.coin == self.coin && 
-                                                f.side == "B" && 
-                                                f.time > (current_time - 10000)
-                                            );
-                                            
-                                            if let Some(fill) = recent_fill {
-                                                let real_price = fill.px.parse::<f64>().unwrap_or(current_price);
-                                                let real_fee = fill.fee.parse::<f64>().unwrap_or(0.0);
-                                                
-                                                println!("📝 Real Fill: ${:.2} (Fee: ${:.4})", real_price, real_fee);
-                                                
-                                                // Update position with real data
-                                                if let Some(pos) = &mut pm.position {
-                                                    pos.entry_price = real_price;
-                                                    pos.entry_fee = real_fee;
-                                                    // Recalculate SL based on real entry
-                                                    let sl_pct = 0.05; // 5% SL
-                                                    pos.stop_loss_price = real_price * (1.0 - sl_pct);
-                                                    pos.stop_loss_pct = sl_pct * 100.0;
-                                                    position.entry_price = real_price; // Update local copy for display
-                                                    position.stop_loss_price = pos.stop_loss_price;
-                                                }
-                                            }
-                                        }
-                                        
-                                        // 🛡️ INTEGRATED STOP LOSS for LONG
-                                        // SL is below entry price
-                                        let sl_price = position.stop_loss_price;
-                                        let sl_price = (sl_price * 100.0).round() / 100.0;
-                                        
-                                        println!("🛡️ PLACING STOP LOSS @ ${:.2} (-5%)...", sl_price);
-                                        match trader.place_stop_loss_order(&self.coin, false, sl_price, position.position_size).await {
-                                            Ok(sl_oid) => println!("✅ STOP LOSS PLACED: OID {}", sl_oid),
-                                            Err(e) => eprintln!("❌ STOP LOSS FAILED: {}", e),
-                                        }
-                                    },
-                                    Err(e) => eprintln!("❌ LIVE ORDER FAILED: {}", e),
-                                }
-                            }
-                        } else {
-                            println!("   ⚠️  Mode: DRY RUN - Position simulated only");
-                        }
-
                         println!("\n💰 TRADE EXECUTION:");
                         println!("   Action:     🟢 BUY (LONG)");
                         println!("   Entry:      ${:.2}", position.entry_price);
@@ -778,32 +719,108 @@ impl HyperliquidFeed {
                         println!("   SL Price:   ${:.2} (-5%)", position.stop_loss_price);
                         println!("   Available:  ${:.2}", pm.bankroll.available_balance);
 
-                        // 💾 Save to Supabase
+                        // Async Execution
+                        let trader = self.trader.clone();
+                        let coin = self.coin.clone();
+                        let pm_arc = self.position_manager.clone();
+                        let is_live = self.is_live;
+                        let position_size = position.position_size;
+                        let entry_price = position.entry_price;
                         let supabase_client = pm.supabase.clone();
-                        if let Some(client) = supabase_client {
-                            let db_pos = crate::supabase::DbPosition {
-                                id: None,
-                                coin: self.coin.clone(),
-                                side: "LONG".to_string(),
-                                entry_price: position.entry_price,
-                                size: position.position_size,
-                                status: "OPEN".to_string(),
-                                created_at: None,
-                                closed_at: None,
-                                exit_price: None,
-                                pnl: None,
-                            };
-                            
-                            match client.save_position(&db_pos).await {
-                                Ok(id) => {
-                                    if let Some(pos) = &mut pm.position {
-                                        pos.db_id = Some(id);
+
+                        tokio::spawn(async move {
+                            let mut real_price = entry_price;
+                            let mut real_fee = 0.0;
+                            let mut success = true;
+
+                            if is_live {
+                                if let Some(trader) = trader {
+                                    println!("🚀 EXECUTING LIVE ORDER...");
+                                    match trader.place_market_order_with_retry(&coin, true, position_size, entry_price, 0.05, 3).await {
+                                        Ok(oid) => {
+                                            println!("✅ LIVE ORDER PLACED: OID {}", oid);
+                                            println!("⏳ Waiting for fill details...");
+                                            sleep(Duration::from_secs(2)).await;
+                                            
+                                            if let Ok(fills) = trader.get_user_fills().await {
+                                                let recent_fill = fills.iter().find(|f| 
+                                                    f.coin == coin && 
+                                                    f.side == "B" && 
+                                                    f.time > (current_time - 10000)
+                                                );
+                                                
+                                                if let Some(fill) = recent_fill {
+                                                    real_price = fill.px.parse::<f64>().unwrap_or(entry_price);
+                                                    real_fee = fill.fee.parse::<f64>().unwrap_or(0.0);
+                                                    println!("📝 Real Fill: ${:.2} (Fee: ${:.4})", real_price, real_fee);
+                                                }
+                                            }
+                                            
+                                            // SL
+                                            let sl_price = (real_price * 0.95 * 100.0).round() / 100.0;
+                                            println!("🛡️ PLACING STOP LOSS @ ${:.2} (-5%)...", sl_price);
+                                            let _ = trader.place_stop_loss_order(&coin, false, sl_price, position_size).await;
+                                        },
+                                        Err(e) => {
+                                            eprintln!("❌ LIVE ORDER FAILED: {}", e);
+                                            success = false;
+                                            // Revert
+                                            let mut pm = pm_arc.lock().await;
+                                            pm.position = None;
+                                            if let Some(client) = &supabase_client {
+                                                let _ = client.log("ERROR", "Live Order Failed", Some(&e.to_string())).await;
+                                            }
+                                        }
                                     }
-                                    println!("✅ Position saved to Supabase (ID: {})", id);
-                                },
-                                Err(e) => eprintln!("❌ Failed to save position to Supabase: {}", e),
+                                }
+                            } else {
+                                println!("   ⚠️  Mode: DRY RUN - Position simulated only");
                             }
-                        }
+
+                            if success {
+                                // Update PM with real data
+                                {
+                                    let mut pm = pm_arc.lock().await;
+                                    if let Some(pos) = &mut pm.position {
+                                        pos.entry_price = real_price;
+                                        pos.entry_fee = real_fee;
+                                        pos.stop_loss_price = real_price * 0.95;
+                                    }
+                                }
+
+                                // Save to Supabase
+                                if let Some(client) = supabase_client {
+                                    let db_pos = crate::supabase::DbPosition {
+                                        id: None,
+                                        coin: coin.clone(),
+                                        side: "LONG".to_string(),
+                                        entry_price: real_price,
+                                        size: position_size,
+                                        status: "OPEN".to_string(),
+                                        created_at: None,
+                                        closed_at: None,
+                                        exit_price: None,
+                                        pnl: None,
+                                    };
+                                    
+                                    let _ = client.log("INFO", "Opening LONG position...", None).await;
+                                    match client.save_position(&db_pos).await {
+                                        Ok(id) => {
+                                            let mut pm = pm_arc.lock().await;
+                                            if let Some(pos) = &mut pm.position {
+                                                pos.db_id = Some(id);
+                                            }
+                                            println!("✅ Position saved to Supabase (ID: {})", id);
+                                            let _ = client.log("INFO", "LONG position opened successfully", Some(&format!("ID: {}", id))).await;
+                                        },
+                                        Err(e) => {
+                                            eprintln!("❌ Failed to save position to Supabase: {}", e);
+                                            let _ = client.log("ERROR", "Failed to open LONG position", Some(&e.to_string())).await;
+                                        }
+                                    }
+                                }
+                            }
+                        });
                     }
                 }
             }
@@ -824,126 +841,127 @@ impl HyperliquidFeed {
                 if should_close {
                     if let Some(closed) = pm.close_position(current_price, current_time) {
                         
-                        let mut final_exit_price = closed.exit_price;
-                        let mut final_pnl = closed.profit_loss;
-                        let mut final_net_pnl = closed.profit_loss;
-                        let mut is_real_data = false;
-
-                        if self.is_live {
-                            if let Some(trader) = &self.trader {
-                                println!("🚀 EXECUTING LIVE ORDER...");
-                                // Use Market Order to close position
-                                match trader.place_market_order_with_retry(&self.coin, false, closed.position_size, current_price, 0.05, 10).await {
-                                    Ok(oid) => {
-                                        println!("✅ LIVE ORDER PLACED: OID {}", oid);
-                                        
-                                        println!("⏳ Waiting for fill details...");
-                                        sleep(Duration::from_secs(2)).await;
-
-                                        // Fetch real data
-                                        let mut realized_pnl = 0.0;
-                                        let mut closing_fee = 0.0;
-                                        let mut funding_paid = 0.0;
-
-                                        if let Ok(fills) = trader.get_user_fills().await {
-                                            let recent_fill = fills.iter().find(|f| 
-                                                f.coin == self.coin && 
-                                                f.side == "A" && // Sell
-                                                f.time > (current_time - 10000)
-                                            );
-                                            
-                                            if let Some(fill) = recent_fill {
-                                                final_exit_price = fill.px.parse().unwrap_or(closed.exit_price);
-                                                closing_fee = fill.fee.parse().unwrap_or(0.0);
-                                                if let Some(pnl_str) = &fill.closed_pnl {
-                                                    realized_pnl = pnl_str.parse().unwrap_or(0.0);
-                                                } else {
-                                                    realized_pnl = (final_exit_price - closed.entry_price) * closed.position_size;
-                                                }
-                                                is_real_data = true;
-                                            }
-                                        }
-
-                                        // Fetch funding
-                                        if let Ok(fundings) = trader.get_user_funding(entry_time).await {
-                                            for f in fundings {
-                                                if f.coin == self.coin {
-                                                    let amount = f.usdc.as_ref().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                                                    funding_paid += amount;
-                                                }
-                                            }
-                                        }
-
-                                        final_pnl = realized_pnl;
-                                        final_net_pnl = realized_pnl - closing_fee - entry_fee + funding_paid;
-                                        
-                                        println!("📝 Real Data: Exit=${:.2}, PnL=${:.2}, Fee=${:.4}, Funding=${:.4}", 
-                                            final_exit_price, realized_pnl, closing_fee + entry_fee, funding_paid);
-                                    },
-                                    Err(e) => eprintln!("❌ LIVE ORDER FAILED: {}", e),
-                                }
-                            }
-                        } else {
-                            println!("   ⚠️  Mode: DRY RUN - Position closed simulated only");
-                            let estimated_fee = closed.position_size * closed.exit_price * 0.0005 * 2.0;
-                            final_net_pnl = closed.profit_loss - estimated_fee;
-                        }
-
                         println!("\n💰 TRADE EXECUTION:");
                         println!("   Action:     🔴 SELL (CLOSE LONG)");
-                        println!("   Exit:       ${:.2}", final_exit_price);
+                        println!("   Exit:       ${:.2}", closed.exit_price);
                         println!("   Size:       {:.4} SOL", closed.position_size);
-                        println!("   P&L:        ${:+.2}", final_pnl);
-                        println!("   Net P&L:    ${:+.2}", final_net_pnl);
+                        println!("   P&L:        ${:+.2}", closed.profit_loss);
                         println!("   Balance:    ${:.2}", pm.bankroll.total_balance);
-                        
-                        // � Update Supabase
-                        if let Some(id) = closed.db_id {
-                            let supabase_client = pm.supabase.clone();
-                            if let Some(client) = supabase_client {
-                                let update = crate::supabase::DbPosition {
-                                    id: Some(id),
-                                    coin: self.coin.clone(),
-                                    side: "LONG".to_string(),
-                                    entry_price: closed.entry_price,
-                                    size: closed.position_size,
-                                    status: "CLOSED".to_string(),
-                                    created_at: None,
-                                    closed_at: Some(chrono::Utc::now()),
-                                    exit_price: Some(final_exit_price),
-                                    pnl: Some(final_net_pnl),
-                                };
-                                
-                                let _ = client.update_position(id, &update).await;
-                                println!("✅ Position updated in Supabase (ID: {})", id);
-                            }
-                        }
 
-                        // �📱 Telegram Notification
-                        if let Some(telegram) = &self.telegram {
-                            let pnl_emoji = if final_net_pnl >= 0.0 { "🟢" } else { "🔴" };
-                            let pnl_type = if is_real_data { "Real" } else { "Est" };
-                            
-                            let message = format!(
-                                "💰 *Position Closed*\n\n\
-                                Action: 🔴 SELL (CLOSE LONG)\n\
-                                Exit Price: ${:.2}\n\
-                                Size: {:.4} SOL\n\
-                                Gross P&L: ${:+.2}\n\
-                                Net P&L ({}): {} ${:+.2} ({:+.2}%)\n\
-                                Balance: ${:.2}",
-                                final_exit_price,
-                                closed.position_size,
-                                final_pnl,
-                                pnl_type, pnl_emoji, final_net_pnl, (final_net_pnl / (closed.position_size * closed.entry_price)) * 100.0,
-                                pm.bankroll.total_balance
-                            );
-                            
-                            let _ = telegram.send_message(&message).await;
-                        }
+                        // Async Execution
+                        let trader = self.trader.clone();
+                        let coin = self.coin.clone();
+                        let is_live = self.is_live;
+                        let telegram = self.telegram.clone();
+                        let supabase_client = pm.supabase.clone();
+                        let closed_pos = closed.clone();
+
+                        tokio::spawn(async move {
+                            let mut final_exit_price = closed_pos.exit_price;
+                            let mut final_pnl = closed_pos.profit_loss;
+                            let mut final_net_pnl = closed_pos.profit_loss;
+                            let mut is_real_data = false;
+
+                            if is_live {
+                                if let Some(trader) = trader {
+                                    println!("🚀 EXECUTING LIVE ORDER...");
+                                    match trader.place_market_order_with_retry(&coin, false, closed_pos.position_size, current_price, 0.05, 10).await {
+                                        Ok(oid) => {
+                                            println!("✅ LIVE ORDER PLACED: OID {}", oid);
+                                            println!("⏳ Waiting for fill details...");
+                                            sleep(Duration::from_secs(2)).await;
+
+                                            let mut realized_pnl = 0.0;
+                                            let mut closing_fee = 0.0;
+                                            let mut funding_paid = 0.0;
+
+                                            if let Ok(fills) = trader.get_user_fills().await {
+                                                let recent_fill = fills.iter().find(|f| 
+                                                    f.coin == coin && 
+                                                    f.side == "A" && 
+                                                    f.time > (current_time - 10000)
+                                                );
+                                                
+                                                if let Some(fill) = recent_fill {
+                                                    final_exit_price = fill.px.parse().unwrap_or(closed_pos.exit_price);
+                                                    closing_fee = fill.fee.parse().unwrap_or(0.0);
+                                                    if let Some(pnl_str) = &fill.closed_pnl {
+                                                        realized_pnl = pnl_str.parse().unwrap_or(0.0);
+                                                    } else {
+                                                        realized_pnl = (final_exit_price - closed_pos.entry_price) * closed_pos.position_size;
+                                                    }
+                                                    is_real_data = true;
+                                                }
+                                            }
+
+                                            if let Ok(fundings) = trader.get_user_funding(entry_time).await {
+                                                for f in fundings {
+                                                    if f.coin == coin {
+                                                        let amount = f.usdc.as_ref().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                                                        funding_paid += amount;
+                                                    }
+                                                }
+                                            }
+
+                                            final_pnl = realized_pnl;
+                                            final_net_pnl = realized_pnl - closing_fee - entry_fee + funding_paid;
+                                            
+                                            println!("📝 Real Data: Exit=${:.2}, PnL=${:.2}, Fee=${:.4}, Funding=${:.4}", 
+                                                final_exit_price, realized_pnl, closing_fee + entry_fee, funding_paid);
+                                        },
+                                        Err(e) => eprintln!("❌ LIVE ORDER FAILED: {}", e),
+                                    }
+                                }
+                            } else {
+                                println!("   ⚠️  Mode: DRY RUN - Position closed simulated only");
+                                let estimated_fee = closed_pos.position_size * closed_pos.exit_price * 0.0005 * 2.0;
+                                final_net_pnl = closed_pos.profit_loss - estimated_fee;
+                            }
+
+                            // Update Supabase
+                            if let Some(id) = closed_pos.db_id {
+                                if let Some(client) = &supabase_client {
+                                    let update = crate::supabase::DbPosition {
+                                        id: Some(id),
+                                        coin: coin.clone(),
+                                        side: "LONG".to_string(),
+                                        entry_price: closed_pos.entry_price,
+                                        size: closed_pos.position_size,
+                                        status: "CLOSED".to_string(),
+                                        created_at: None,
+                                        closed_at: Some(chrono::Utc::now()),
+                                        exit_price: Some(final_exit_price),
+                                        pnl: Some(final_net_pnl),
+                                    };
+                                    
+                                    let _ = client.update_position(id, &update).await;
+                                    println!("✅ Position updated in Supabase (ID: {})", id);
+                                }
+                            }
+
+                            // Telegram Notification
+                            if let Some(telegram) = telegram {
+                                let pnl_emoji = if final_net_pnl >= 0.0 { "🟢" } else { "🔴" };
+                                let pnl_type = if is_real_data { "Real" } else { "Est" };
+                                
+                                let message = format!(
+                                    "💰 *Position Closed*\n\n\
+                                    Action: 🔴 SELL (CLOSE LONG)\n\
+                                    Exit Price: ${:.2}\n\
+                                    Size: {:.4} SOL\n\
+                                    Gross P&L: ${:+.2}\n\
+                                    Net P&L ({}): {} ${:+.2} ({:+.2}%)",
+                                    final_exit_price,
+                                    closed_pos.position_size,
+                                    final_pnl,
+                                    pnl_type, pnl_emoji, final_net_pnl, (final_net_pnl / (closed_pos.position_size * closed_pos.entry_price)) * 100.0
+                                );
+                                
+                                let _ = telegram.send_message(&message).await;
+                            }
+                        });
                     }
-                }
-            }
+                }            }
             Signal::SellShort => {
                 let mut pm = self.position_manager.lock().await;
                 if pm.position.is_none() {
@@ -952,96 +970,118 @@ impl HyperliquidFeed {
                     
                     if let Some(mut position) = pm.open_short(current_price, current_time, stop_loss_price) {
                         
-                        if self.is_live {
-                            if let Some(trader) = &self.trader {
-                                println!("🚀 EXECUTING LIVE ORDER...");
-                                // Use Market Order (Limit with 5% slippage)
-                                match trader.place_market_order(&self.coin, false, position.position_size, current_price, 0.05).await {
-                                    Ok(oid) => {
-                                        println!("✅ LIVE ORDER PLACED: OID {}", oid);
-                                        
-                                        println!("⏳ Waiting for fill details...");
-                                        sleep(Duration::from_secs(2)).await;
-                                        
-                                        if let Ok(fills) = trader.get_user_fills().await {
-                                            let recent_fill = fills.iter().find(|f| 
-                                                f.coin == self.coin && 
-                                                f.side == "A" && // Sell Short
-                                                f.time > (current_time - 10000)
-                                            );
-                                            
-                                            if let Some(fill) = recent_fill {
-                                                let real_price = fill.px.parse::<f64>().unwrap_or(current_price);
-                                                let real_fee = fill.fee.parse::<f64>().unwrap_or(0.0);
-                                                
-                                                println!("📝 Real Fill: ${:.2} (Fee: ${:.4})", real_price, real_fee);
-                                                
-                                                if let Some(pos) = &mut pm.position {
-                                                    pos.entry_price = real_price;
-                                                    pos.entry_fee = real_fee;
-                                                    let sl_pct = 0.05; // 5% SL
-                                                    pos.stop_loss_price = real_price * (1.0 + sl_pct);
-                                                    pos.stop_loss_pct = sl_pct * 100.0;
-                                                    position.entry_price = real_price;
-                                                    position.stop_loss_price = pos.stop_loss_price;
-                                                }
-                                            }
-                                        }
-                                        
-                                        // 🛡️ INTEGRATED STOP LOSS for SHORT
-                                        // SL is above entry price
-                                        let sl_price = position.stop_loss_price;
-                                        let sl_price = (sl_price * 100.0).round() / 100.0;
-                                        
-                                        println!("🛡️ PLACING STOP LOSS @ ${:.2} (+5%)...", sl_price);
-                                        match trader.place_stop_loss_order(&self.coin, true, sl_price, position.position_size).await {
-                                            Ok(sl_oid) => println!("✅ STOP LOSS PLACED: OID {}", sl_oid),
-                                            Err(e) => eprintln!("❌ STOP LOSS FAILED: {}", e),
-                                        }
-                                    },
-                                    Err(e) => eprintln!("❌ LIVE ORDER FAILED: {}", e),
-                                }
-                            }
-                        } else {
-                            println!("   ⚠️  Mode: DRY RUN - Position simulated only");
-                        }
-
                         println!("\n💰 TRADE EXECUTION:");
                         println!("   Action:     📉 SHORT");
                         println!("   Entry:      ${:.2}", position.entry_price);
                         println!("   Size:       {:.4} SOL", position.position_size);
                         println!("   Value:      ${:.2}", position.position_value);
-                        println!("   SL Price:   ${:.2} (+6%)", position.stop_loss_price);
+                        println!("   SL Price:   ${:.2} (+5%)", position.stop_loss_price);
                         println!("   Available:  ${:.2}", pm.bankroll.available_balance);
 
-                        // 💾 Save to Supabase
+                        // Async Execution
+                        let trader = self.trader.clone();
+                        let coin = self.coin.clone();
+                        let pm_arc = self.position_manager.clone();
+                        let is_live = self.is_live;
+                        let position_size = position.position_size;
+                        let entry_price = position.entry_price;
                         let supabase_client = pm.supabase.clone();
-                        if let Some(client) = supabase_client {
-                            let db_pos = crate::supabase::DbPosition {
-                                id: None,
-                                coin: self.coin.clone(),
-                                side: "SHORT".to_string(),
-                                entry_price: position.entry_price,
-                                size: position.position_size,
-                                status: "OPEN".to_string(),
-                                created_at: None,
-                                closed_at: None,
-                                exit_price: None,
-                                pnl: None,
-                            };
-                            
-                            match client.save_position(&db_pos).await {
-                                Ok(id) => {
-                                    if let Some(pos) = &mut pm.position {
-                                        pos.db_id = Some(id);
+
+                        tokio::spawn(async move {
+                            let mut real_price = entry_price;
+                            let mut real_fee = 0.0;
+                            let mut success = true;
+
+                            if is_live {
+                                if let Some(trader) = trader {
+                                    println!("🚀 EXECUTING LIVE ORDER...");
+                                    // Use Market Order (Limit with 5% slippage)
+                                    match trader.place_market_order(&coin, false, position_size, entry_price, 0.05).await {
+                                        Ok(oid) => {
+                                            println!("✅ LIVE ORDER PLACED: OID {}", oid);
+                                            println!("⏳ Waiting for fill details...");
+                                            sleep(Duration::from_secs(2)).await;
+                                            
+                                            if let Ok(fills) = trader.get_user_fills().await {
+                                                let recent_fill = fills.iter().find(|f| 
+                                                    f.coin == coin && 
+                                                    f.side == "A" && // Sell Short
+                                                    f.time > (current_time - 10000)
+                                                );
+                                                
+                                                if let Some(fill) = recent_fill {
+                                                    real_price = fill.px.parse::<f64>().unwrap_or(entry_price);
+                                                    real_fee = fill.fee.parse::<f64>().unwrap_or(0.0);
+                                                    println!("📝 Real Fill: ${:.2} (Fee: ${:.4})", real_price, real_fee);
+                                                }
+                                            }
+                                            
+                                            // SL
+                                            let sl_price = (real_price * 1.05 * 100.0).round() / 100.0;
+                                            println!("🛡️ PLACING STOP LOSS @ ${:.2} (+5%)...", sl_price);
+                                            let _ = trader.place_stop_loss_order(&coin, true, sl_price, position_size).await;
+                                        },
+                                        Err(e) => {
+                                            eprintln!("❌ LIVE ORDER FAILED: {}", e);
+                                            success = false;
+                                            // Revert
+                                            let mut pm = pm_arc.lock().await;
+                                            pm.position = None;
+                                            if let Some(client) = &supabase_client {
+                                                let _ = client.log("ERROR", "Live Order Failed", Some(&e.to_string())).await;
+                                            }
+                                        }
                                     }
-                                    println!("✅ Position saved to Supabase (ID: {})", id);
-                                },
-                                Err(e) => eprintln!("❌ Failed to save position to Supabase: {}", e),
+                                }
+                            } else {
+                                println!("   ⚠️  Mode: DRY RUN - Position simulated only");
                             }
-                        }
-                    }
-                }
+
+                            if success {
+                                // Update PM with real data
+                                {
+                                    let mut pm = pm_arc.lock().await;
+                                    if let Some(pos) = &mut pm.position {
+                                        pos.entry_price = real_price;
+                                        pos.entry_fee = real_fee;
+                                        pos.stop_loss_price = real_price * 1.05;
+                                    }
+                                }
+
+                                // Save to Supabase
+                                if let Some(client) = supabase_client {
+                                    let db_pos = crate::supabase::DbPosition {
+                                        id: None,
+                                        coin: coin.clone(),
+                                        side: "SHORT".to_string(),
+                                        entry_price: real_price,
+                                        size: position_size,
+                                        status: "OPEN".to_string(),
+                                        created_at: None,
+                                        closed_at: None,
+                                        exit_price: None,
+                                        pnl: None,
+                                    };
+                                    
+                                    let _ = client.log("INFO", "Opening SHORT position...", None).await;
+                                    match client.save_position(&db_pos).await {
+                                        Ok(id) => {
+                                            let mut pm = pm_arc.lock().await;
+                                            if let Some(pos) = &mut pm.position {
+                                                pos.db_id = Some(id);
+                                            }
+                                            println!("✅ Position saved to Supabase (ID: {})", id);
+                                            let _ = client.log("INFO", "SHORT position opened successfully", Some(&format!("ID: {}", id))).await;
+                                        },
+                                        Err(e) => {
+                                            eprintln!("❌ Failed to save position to Supabase: {}", e);
+                                            let _ = client.log("ERROR", "Failed to open SHORT position", Some(&e.to_string())).await;
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    }                }
             }
             Signal::CoverShort => {
                 let mut pm = self.position_manager.lock().await;
@@ -1060,125 +1100,128 @@ impl HyperliquidFeed {
                 if should_close {
                     if let Some(closed) = pm.close_position(current_price, current_time) {
                         
-                        let mut final_exit_price = closed.exit_price;
-                        let mut final_pnl = closed.profit_loss;
-                        let mut final_net_pnl = closed.profit_loss;
-                        let mut is_real_data = false;
-
-                        if self.is_live {
-                            if let Some(trader) = &self.trader {
-                                println!("🚀 EXECUTING LIVE ORDER...");
-                                // Use Market Order to close position
-                                match trader.place_market_order(&self.coin, true, closed.position_size, current_price, 0.05).await {
-                                    Ok(oid) => {
-                                        println!("✅ LIVE ORDER PLACED: OID {}", oid);
-                                        
-                                        println!("⏳ Waiting for fill details...");
-                                        sleep(Duration::from_secs(2)).await;
-
-                                        let mut realized_pnl = 0.0;
-                                        let mut closing_fee = 0.0;
-                                        let mut funding_paid = 0.0;
-
-                                        if let Ok(fills) = trader.get_user_fills().await {
-                                            let recent_fill = fills.iter().find(|f| 
-                                                f.coin == self.coin && 
-                                                f.side == "B" && // Buy to Cover
-                                                f.time > (current_time - 10000)
-                                            );
-                                            
-                                            if let Some(fill) = recent_fill {
-                                                final_exit_price = fill.px.parse().unwrap_or(closed.exit_price);
-                                                closing_fee = fill.fee.parse().unwrap_or(0.0);
-                                                if let Some(pnl_str) = &fill.closed_pnl {
-                                                    realized_pnl = pnl_str.parse().unwrap_or(0.0);
-                                                } else {
-                                                    realized_pnl = (closed.entry_price - final_exit_price) * closed.position_size;
-                                                }
-                                                is_real_data = true;
-                                            }
-                                        }
-
-                                        if let Ok(fundings) = trader.get_user_funding(entry_time).await {
-                                            for f in fundings {
-                                                if f.coin == self.coin {
-                                                    let amount = f.usdc.as_ref().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                                                    funding_paid += amount;
-                                                }
-                                            }
-                                        }
-
-                                        final_pnl = realized_pnl;
-                                        final_net_pnl = realized_pnl - closing_fee - entry_fee + funding_paid;
-                                        
-                                        println!("📝 Real Data: Exit=${:.2}, PnL=${:.2}, Fee=${:.4}, Funding=${:.4}", 
-                                            final_exit_price, realized_pnl, closing_fee + entry_fee, funding_paid);
-                                    },
-                                    Err(e) => eprintln!("❌ LIVE ORDER FAILED: {}", e),
-                                }
-                            }
-                        } else {
-                            println!("   ⚠️  Mode: DRY RUN - Position simulated only");
-                            let estimated_fee = closed.position_size * closed.exit_price * 0.0005 * 2.0;
-                            final_net_pnl = closed.profit_loss - estimated_fee;
-                        }
-
                         println!("\n💰 TRADE EXECUTION:");
                         println!("   Action:     🔼 COVER SHORT");
-                        println!("   Exit:       ${:.2}", final_exit_price);
+                        println!("   Exit:       ${:.2}", closed.exit_price);
                         println!("   Size:       {:.4} SOL", closed.position_size);
-                        println!("   P&L:        ${:+.2}", final_pnl);
-                        println!("   Net P&L:    ${:+.2}", final_net_pnl);
+                        println!("   P&L:        ${:+.2}", closed.profit_loss);
                         println!("   Balance:    ${:.2}", pm.bankroll.total_balance);
-                        
-                        // � Update Supabase
-                        if let Some(id) = closed.db_id {
-                            let supabase_client = pm.supabase.clone();
-                            if let Some(client) = supabase_client {
-                                let update = crate::supabase::DbPosition {
-                                    id: Some(id),
-                                    coin: self.coin.clone(),
-                                    side: "SHORT".to_string(),
-                                    entry_price: closed.entry_price,
-                                    size: closed.position_size,
-                                    status: "CLOSED".to_string(),
-                                    created_at: None,
-                                    closed_at: Some(chrono::Utc::now()),
-                                    exit_price: Some(final_exit_price),
-                                    pnl: Some(final_net_pnl),
-                                };
-                                
-                                let _ = client.update_position(id, &update).await;
-                                println!("✅ Position updated in Supabase (ID: {})", id);
-                            }
-                        }
 
-                        // �📱 Telegram Notification
-                        if let Some(telegram) = &self.telegram {
-                            let pnl_emoji = if final_net_pnl >= 0.0 { "🟢" } else { "🔴" };
-                            let pnl_type = if is_real_data { "Real" } else { "Est" };
-                            
-                            let message = format!(
-                                "💰 *Position Closed*\n\n\
-                                Action: 🔼 COVER SHORT\n\
-                                Exit Price: ${:.2}\n\
-                                Size: {:.4} SOL\n\
-                                Gross P&L: ${:+.2}\n\
-                                Net P&L ({}): {} ${:+.2} ({:+.2}%)\n\
-                                Balance: ${:.2}",
-                                final_exit_price,
-                                closed.position_size,
-                                final_pnl,
-                                pnl_type, pnl_emoji, final_net_pnl, (final_net_pnl / (closed.position_size * closed.entry_price)) * 100.0,
-                                pm.bankroll.total_balance
-                            );
-                            
-                            let _ = telegram.send_message(&message).await;
-                        }
+                        // Async Execution
+                        let trader = self.trader.clone();
+                        let coin = self.coin.clone();
+                        let is_live = self.is_live;
+                        let telegram = self.telegram.clone();
+                        let supabase_client = pm.supabase.clone();
+                        let closed_pos = closed.clone();
+
+                        tokio::spawn(async move {
+                            let mut final_exit_price = closed_pos.exit_price;
+                            let mut final_pnl = closed_pos.profit_loss;
+                            let mut final_net_pnl = closed_pos.profit_loss;
+                            let mut is_real_data = false;
+
+                            if is_live {
+                                if let Some(trader) = trader {
+                                    println!("🚀 EXECUTING LIVE ORDER...");
+                                    // Use Market Order to close position
+                                    match trader.place_market_order(&coin, true, closed_pos.position_size, current_price, 0.05).await {
+                                        Ok(oid) => {
+                                            println!("✅ LIVE ORDER PLACED: OID {}", oid);
+                                            println!("⏳ Waiting for fill details...");
+                                            sleep(Duration::from_secs(2)).await;
+
+                                            let mut realized_pnl = 0.0;
+                                            let mut closing_fee = 0.0;
+                                            let mut funding_paid = 0.0;
+
+                                            if let Ok(fills) = trader.get_user_fills().await {
+                                                let recent_fill = fills.iter().find(|f| 
+                                                    f.coin == coin && 
+                                                    f.side == "B" && // Buy to Cover
+                                                    f.time > (current_time - 10000)
+                                                );
+                                                
+                                                if let Some(fill) = recent_fill {
+                                                    final_exit_price = fill.px.parse().unwrap_or(closed_pos.exit_price);
+                                                    closing_fee = fill.fee.parse().unwrap_or(0.0);
+                                                    if let Some(pnl_str) = &fill.closed_pnl {
+                                                        realized_pnl = pnl_str.parse().unwrap_or(0.0);
+                                                    } else {
+                                                        realized_pnl = (closed_pos.entry_price - final_exit_price) * closed_pos.position_size;
+                                                    }
+                                                    is_real_data = true;
+                                                }
+                                            }
+
+                                            if let Ok(fundings) = trader.get_user_funding(entry_time).await {
+                                                for f in fundings {
+                                                    if f.coin == coin {
+                                                        let amount = f.usdc.as_ref().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                                                        funding_paid += amount;
+                                                    }
+                                                }
+                                            }
+
+                                            final_pnl = realized_pnl;
+                                            final_net_pnl = realized_pnl - closing_fee - entry_fee + funding_paid;
+                                            
+                                            println!("📝 Real Data: Exit=${:.2}, PnL=${:.2}, Fee=${:.4}, Funding=${:.4}", 
+                                                final_exit_price, realized_pnl, closing_fee + entry_fee, funding_paid);
+                                        },
+                                        Err(e) => eprintln!("❌ LIVE ORDER FAILED: {}", e),
+                                    }
+                                }
+                            } else {
+                                println!("   ⚠️  Mode: DRY RUN - Position simulated only");
+                                let estimated_fee = closed_pos.position_size * closed_pos.exit_price * 0.0005 * 2.0;
+                                final_net_pnl = closed_pos.profit_loss - estimated_fee;
+                            }
+
+                            // Update Supabase
+                            if let Some(id) = closed_pos.db_id {
+                                if let Some(client) = &supabase_client {
+                                    let update = crate::supabase::DbPosition {
+                                        id: Some(id),
+                                        coin: coin.clone(),
+                                        side: "SHORT".to_string(),
+                                        entry_price: closed_pos.entry_price,
+                                        size: closed_pos.position_size,
+                                        status: "CLOSED".to_string(),
+                                        created_at: None,
+                                        closed_at: Some(chrono::Utc::now()),
+                                        exit_price: Some(final_exit_price),
+                                        pnl: Some(final_net_pnl),
+                                    };
+                                    
+                                    let _ = client.update_position(id, &update).await;
+                                    println!("✅ Position updated in Supabase (ID: {})", id);
+                                }
+                            }
+
+                            // Telegram Notification
+                            if let Some(telegram) = telegram {
+                                let pnl_emoji = if final_net_pnl >= 0.0 { "🟢" } else { "🔴" };
+                                let pnl_type = if is_real_data { "Real" } else { "Est" };
+                                
+                                let message = format!(
+                                    "💰 *Position Closed*\\n\\n\
+                                    Action: 🔼 COVER SHORT\\n\
+                                    Exit Price: ${:.2}\\n\
+                                    Size: {:.4} SOL\\n\
+                                    Gross P&L: ${:+.2}\\n\
+                                    Net P&L ({}): {} ${:+.2} ({:+.2}%)",
+                                    final_exit_price,
+                                    closed_pos.position_size,
+                                    final_pnl,
+                                    pnl_type, pnl_emoji, final_net_pnl, (final_net_pnl / (closed_pos.position_size * closed_pos.entry_price)) * 100.0
+                                );
+                                
+                                let _ = telegram.send_message(&message).await;
+                            }
+                        });
                     }
-                }
-            }
-            _ => {}
+                }            _ => {}
         }
     }
 
