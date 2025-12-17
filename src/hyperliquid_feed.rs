@@ -532,6 +532,7 @@ impl HyperliquidFeed {
             {
                 let mut pm = self.position_manager.lock().await;
                 pm.last_adx = self.strategy.get_adx_value();
+                pm.last_rsi = self.strategy.get_rsi_value();
                 pm.last_regime = format!("{:?}", self.strategy.get_current_regime());
                 pm.last_bollinger = self.strategy.get_bollinger_bands();
             }

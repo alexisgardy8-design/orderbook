@@ -180,6 +180,7 @@ pub struct PositionManager {
     
     // Indicators for Telegram display
     pub last_adx: f64,
+    pub last_rsi: f64,
     pub last_regime: String,
     pub last_bollinger: Option<(f64, f64, f64)>,
 }
@@ -208,6 +209,7 @@ impl PositionManager {
             initial_balance_session: bankroll,
             supabase,
             last_adx: 0.0,
+            last_rsi: 50.0,
             last_regime: "Unknown".to_string(),
             last_bollinger: None,
         }
@@ -222,6 +224,7 @@ impl PositionManager {
             trade_timestamps: VecDeque::new(),
             initial_balance_session: bankroll,
             last_adx: 0.0,
+            last_rsi: 50.0,
             last_regime: "Unknown".to_string(),
             last_bollinger: None,
         }

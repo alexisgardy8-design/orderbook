@@ -226,6 +226,7 @@ impl TelegramBot {
 
                                             msg.push_str("*Indicators:*\n");
                                             msg.push_str(&format!("ADX: {:.2}\n", pm.last_adx));
+                                            msg.push_str(&format!("RSI: {:.2}\n", pm.last_rsi));
                                             msg.push_str(&format!("Regime: {}\n", pm.last_regime));
                                             if let Some((l, m, u)) = pm.last_bollinger {
                                                 msg.push_str(&format!("Bollinger: L:{:.2} M:{:.2} U:{:.2}", l, m, u));
