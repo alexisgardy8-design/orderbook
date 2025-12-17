@@ -123,7 +123,7 @@ impl HyperliquidFeed {
             interval,
             candle_buffer: VecDeque::with_capacity(CANDLE_BUFFER_SIZE),
             strategy: crate::adaptive_strategy::AdaptiveStrategy::new(AdaptiveConfig {
-                adx_threshold: 20.0,
+                adx_threshold: 10.0,
                 ..Default::default()
             }),
             position_manager,
@@ -704,8 +704,8 @@ impl HyperliquidFeed {
             Signal::BuyRange | Signal::BuyTrend => {
                 let mut pm = self.position_manager.lock().await;
                 if pm.position.is_none() {
-                    // Calculer le SL à 6% en dessous du prix d'entrée (Optimized Strategy)
-                    let stop_loss_price = current_price * 0.94;
+                    // Calculer le SL à 5% en dessous du prix d'entrée (Optimized Strategy)
+                    let stop_loss_price = current_price * 0.95;
                     
                     if let Some(mut position) = pm.open_long(current_price, current_time, stop_loss_price) {
                         
@@ -741,7 +741,7 @@ impl HyperliquidFeed {
                                                     pos.entry_price = real_price;
                                                     pos.entry_fee = real_fee;
                                                     // Recalculate SL based on real entry
-                                                    let sl_pct = 0.06; // 6% SL
+                                                    let sl_pct = 0.05; // 5% SL
                                                     pos.stop_loss_price = real_price * (1.0 - sl_pct);
                                                     pos.stop_loss_pct = sl_pct * 100.0;
                                                     position.entry_price = real_price; // Update local copy for display
@@ -755,7 +755,7 @@ impl HyperliquidFeed {
                                         let sl_price = position.stop_loss_price;
                                         let sl_price = (sl_price * 100.0).round() / 100.0;
                                         
-                                        println!("🛡️ PLACING STOP LOSS @ ${:.2} (-6%)...", sl_price);
+                                        println!("🛡️ PLACING STOP LOSS @ ${:.2} (-5%)...", sl_price);
                                         match trader.place_stop_loss_order(&self.coin, false, sl_price, position.position_size).await {
                                             Ok(sl_oid) => println!("✅ STOP LOSS PLACED: OID {}", sl_oid),
                                             Err(e) => eprintln!("❌ STOP LOSS FAILED: {}", e),
@@ -773,7 +773,7 @@ impl HyperliquidFeed {
                         println!("   Entry:      ${:.2}", position.entry_price);
                         println!("   Size:       {:.4} SOL", position.position_size);
                         println!("   Value:      ${:.2}", position.position_value);
-                        println!("   SL Price:   ${:.2} (-6%)", position.stop_loss_price);
+                        println!("   SL Price:   ${:.2} (-5%)", position.stop_loss_price);
                         println!("   Available:  ${:.2}", pm.bankroll.available_balance);
 
                         // 💾 Save to Supabase
@@ -945,8 +945,8 @@ impl HyperliquidFeed {
             Signal::SellShort => {
                 let mut pm = self.position_manager.lock().await;
                 if pm.position.is_none() {
-                    // Calculer le SL à 6% au-dessus du prix d'entrée (pour un short)
-                    let stop_loss_price = current_price * 1.06;
+                    // Calculer le SL à 5% au-dessus du prix d'entrée (pour un short)
+                    let stop_loss_price = current_price * 1.05;
                     
                     if let Some(mut position) = pm.open_short(current_price, current_time, stop_loss_price) {
                         
@@ -977,7 +977,7 @@ impl HyperliquidFeed {
                                                 if let Some(pos) = &mut pm.position {
                                                     pos.entry_price = real_price;
                                                     pos.entry_fee = real_fee;
-                                                    let sl_pct = 0.06; // 6% SL
+                                                    let sl_pct = 0.05; // 5% SL
                                                     pos.stop_loss_price = real_price * (1.0 + sl_pct);
                                                     pos.stop_loss_pct = sl_pct * 100.0;
                                                     position.entry_price = real_price;
@@ -991,7 +991,7 @@ impl HyperliquidFeed {
                                         let sl_price = position.stop_loss_price;
                                         let sl_price = (sl_price * 100.0).round() / 100.0;
                                         
-                                        println!("🛡️ PLACING STOP LOSS @ ${:.2} (+6%)...", sl_price);
+                                        println!("🛡️ PLACING STOP LOSS @ ${:.2} (+5%)...", sl_price);
                                         match trader.place_stop_loss_order(&self.coin, true, sl_price, position.position_size).await {
                                             Ok(sl_oid) => println!("✅ STOP LOSS PLACED: OID {}", sl_oid),
                                             Err(e) => eprintln!("❌ STOP LOSS FAILED: {}", e),

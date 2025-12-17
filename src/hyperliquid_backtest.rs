@@ -479,41 +479,59 @@ pub fn run_hyperliquid_backtest() {
     
     print_hyperliquid_results(&results_range, "Adaptive Range-Biased (ADX=25)");
 
-    // 🔍 OPTIMIZATION: Find Best Stop Loss for Trend-Biased Strategy
+    // 🔍 OPTIMIZATION: Find Best Combination (ADX Threshold + Stop Loss)
     println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("🔍 OPTIMIZATION: Finding Best Stop Loss (Trend-Biased)");
+    println!("🔍 OPTIMIZATION: Finding Best Combination (ADX + SL)");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    let mut best_sl_pct = 0.0;
-    let mut best_sl_return = -999.0;
-    let mut best_sl_results = results_trend.clone();
+    let mut best_combo_score = -999.0;
+    let mut best_combo_desc = String::new();
+    let mut best_combo_results = results_standard.clone();
 
+    // Test ADX Thresholds: 10, 15, 20, 25, 30
+    let adx_thresholds = vec![10.0, 15.0, 20.0, 25.0, 30.0];
+    
     // Test SL from 1% to 10%
-    for sl in 1..=10 {
-        let current_sl = sl as f64 / 100.0;
-        print!("   Testing SL {:.0}% ... ", sl);
-        
-        let res = run_hyperliquid_adaptive_backtest(
-            config_trend_biased.clone(),
-            initial_capital,
-            fee_rate,
-            slippage_rate,
-            hourly_funding_rate,
-            &candles,
-            current_sl,
-        );
-        
-        println!("Return: {:+.2}% | Sharpe: {:.2}", res.total_return_pct, res.sharpe_ratio);
-        
-        if res.total_return_pct > best_sl_return {
-            best_sl_return = res.total_return_pct;
-            best_sl_pct = current_sl;
-            best_sl_results = res;
+    let sl_values: Vec<f64> = (1..=10).map(|x| x as f64 / 100.0).collect();
+
+    println!("Testing {} combinations...", adx_thresholds.len() * sl_values.len());
+    println!("Score Formula: Return * 0.6 + Sharpe * 20.0 - MaxDrawdown * 1.5");
+
+    for &adx in &adx_thresholds {
+        for &sl in &sl_values {
+            let config = AdaptiveConfig {
+                adx_threshold: adx,
+                ..Default::default()
+            };
+            
+            let res = run_hyperliquid_adaptive_backtest(
+                config,
+                initial_capital,
+                fee_rate,
+                slippage_rate,
+                hourly_funding_rate,
+                &candles,
+                sl,
+            );
+            
+            // Custom Score: Balance Return, Risk (Sharpe), and Safety (Drawdown)
+            // Return is %, e.g., 100.0
+            // Sharpe is ratio, e.g., 0.1
+            // Drawdown is %, e.g., 20.0
+            let score = (res.total_return_pct * 0.6) + (res.sharpe_ratio * 20.0) - (res.max_drawdown_pct * 1.5);
+            
+            if score > best_combo_score {
+                best_combo_score = score;
+                best_combo_desc = format!("ADX={:.0} + SL={:.0}%", adx, sl * 100.0);
+                best_combo_results = res.clone();
+                println!("✨ New Best: {} -> Return: {:+.2}% | Sharpe: {:.2} | DD: {:.2}% | Score: {:.2}", 
+                    best_combo_desc, res.total_return_pct, res.sharpe_ratio, res.max_drawdown_pct, score);
+            }
         }
     }
 
-    println!("\n🏆 BEST STOP LOSS FOUND: {:.0}%", best_sl_pct * 100.0);
-    print_hyperliquid_results(&best_sl_results, &format!("Optimized Trend-Biased (SL={:.0}%)", best_sl_pct * 100.0));
+    println!("\n🏆 ULTIMATE WINNER: {}", best_combo_desc);
+    print_hyperliquid_results(&best_combo_results, &format!("Ultimate Optimized ({})", best_combo_desc));
     
     // Comparaison finale
     println!("\n╔═══════════════════════════════════════════════════════════════╗");
@@ -524,7 +542,7 @@ pub fn run_hyperliquid_backtest() {
         ("Adaptive Standard (20)", &results_standard),
         ("Adaptive Trend-Biased (15)", &results_trend),
         ("Adaptive Range-Biased (25)", &results_range),
-        ("🏆 Optimized Trend (SL)", &best_sl_results),
+        ("🏆 Ultimate Optimized", &best_combo_results),
     ];
     
     let best = strategies
