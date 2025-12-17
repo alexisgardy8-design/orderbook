@@ -736,7 +736,7 @@ impl HyperliquidFeed {
                             if is_live {
                                 if let Some(trader) = trader {
                                     println!("🚀 EXECUTING LIVE ORDER...");
-                                    match trader.place_market_order_with_retry(&coin, true, position_size, entry_price, 0.05, 3).await {
+                                    match trader.place_market_order_with_retry(&coin, true, position_size, entry_price, 0.05, 3).await.map_err(|e| e.to_string()) {
                                         Ok(oid) => {
                                             println!("✅ LIVE ORDER PLACED: OID {}", oid);
                                             println!("⏳ Waiting for fill details...");
@@ -768,7 +768,7 @@ impl HyperliquidFeed {
                                             let mut pm = pm_arc.lock().await;
                                             pm.position = None;
                                             if let Some(client) = &supabase_client {
-                                                let _ = client.log("ERROR", "Live Order Failed", Some(&e.to_string())).await;
+                                                let _ = client.log("ERROR", "Live Order Failed", Some(&e)).await;
                                             }
                                         }
                                     }
@@ -804,7 +804,7 @@ impl HyperliquidFeed {
                                     };
                                     
                                     let _ = client.log("INFO", "Opening LONG position...", None).await;
-                                    match client.save_position(&db_pos).await {
+                                    match client.save_position(&db_pos).await.map_err(|e| e.to_string()) {
                                         Ok(id) => {
                                             let mut pm = pm_arc.lock().await;
                                             if let Some(pos) = &mut pm.position {
@@ -815,7 +815,7 @@ impl HyperliquidFeed {
                                         },
                                         Err(e) => {
                                             eprintln!("❌ Failed to save position to Supabase: {}", e);
-                                            let _ = client.log("ERROR", "Failed to open LONG position", Some(&e.to_string())).await;
+                                            let _ = client.log("ERROR", "Failed to open LONG position", Some(&e)).await;
                                         }
                                     }
                                 }
@@ -865,7 +865,7 @@ impl HyperliquidFeed {
                             if is_live {
                                 if let Some(trader) = trader {
                                     println!("🚀 EXECUTING LIVE ORDER...");
-                                    match trader.place_market_order_with_retry(&coin, false, closed_pos.position_size, current_price, 0.05, 10).await {
+                                    match trader.place_market_order_with_retry(&coin, false, closed_pos.position_size, current_price, 0.05, 10).await.map_err(|e| e.to_string()) {
                                         Ok(oid) => {
                                             println!("✅ LIVE ORDER PLACED: OID {}", oid);
                                             println!("⏳ Waiting for fill details...");
@@ -996,7 +996,7 @@ impl HyperliquidFeed {
                                 if let Some(trader) = trader {
                                     println!("🚀 EXECUTING LIVE ORDER...");
                                     // Use Market Order (Limit with 5% slippage)
-                                    match trader.place_market_order(&coin, false, position_size, entry_price, 0.05).await {
+                                    match trader.place_market_order(&coin, false, position_size, entry_price, 0.05).await.map_err(|e| e.to_string()) {
                                         Ok(oid) => {
                                             println!("✅ LIVE ORDER PLACED: OID {}", oid);
                                             println!("⏳ Waiting for fill details...");
@@ -1028,7 +1028,7 @@ impl HyperliquidFeed {
                                             let mut pm = pm_arc.lock().await;
                                             pm.position = None;
                                             if let Some(client) = &supabase_client {
-                                                let _ = client.log("ERROR", "Live Order Failed", Some(&e.to_string())).await;
+                                                let _ = client.log("ERROR", "Live Order Failed", Some(&e)).await;
                                             }
                                         }
                                     }
@@ -1064,7 +1064,7 @@ impl HyperliquidFeed {
                                     };
                                     
                                     let _ = client.log("INFO", "Opening SHORT position...", None).await;
-                                    match client.save_position(&db_pos).await {
+                                    match client.save_position(&db_pos).await.map_err(|e| e.to_string()) {
                                         Ok(id) => {
                                             let mut pm = pm_arc.lock().await;
                                             if let Some(pos) = &mut pm.position {
@@ -1075,7 +1075,7 @@ impl HyperliquidFeed {
                                         },
                                         Err(e) => {
                                             eprintln!("❌ Failed to save position to Supabase: {}", e);
-                                            let _ = client.log("ERROR", "Failed to open SHORT position", Some(&e.to_string())).await;
+                                            let _ = client.log("ERROR", "Failed to open SHORT position", Some(&e)).await;
                                         }
                                     }
                                 }
@@ -1125,7 +1125,7 @@ impl HyperliquidFeed {
                                 if let Some(trader) = trader {
                                     println!("🚀 EXECUTING LIVE ORDER...");
                                     // Use Market Order to close position
-                                    match trader.place_market_order(&coin, true, closed_pos.position_size, current_price, 0.05).await {
+                                    match trader.place_market_order(&coin, true, closed_pos.position_size, current_price, 0.05).await.map_err(|e| e.to_string()) {
                                         Ok(oid) => {
                                             println!("✅ LIVE ORDER PLACED: OID {}", oid);
                                             println!("⏳ Waiting for fill details...");
@@ -1221,7 +1221,9 @@ impl HyperliquidFeed {
                             }
                         });
                     }
-                }            _ => {}
+                }
+            }
+            _ => {}
         }
     }
 

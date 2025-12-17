@@ -809,7 +809,7 @@ impl HyperliquidTrader {
     ) -> Result<u64, Box<dyn std::error::Error>> {
         let mut attempt = 0;
         loop {
-            match self.place_market_order(coin, is_buy, sz, current_price, slippage_pct).await {
+            let delay = match self.place_market_order(coin, is_buy, sz, current_price, slippage_pct).await {
                 Ok(oid) => return Ok(oid),
                 Err(e) => {
                     attempt += 1;
@@ -818,9 +818,10 @@ impl HyperliquidTrader {
                     }
                     let delay = 2u64.pow(attempt);
                     eprintln!("⚠️ Market Order failed (attempt {}/{}): {}. Retrying in {}s...", attempt, max_retries, e, delay);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(delay)).await;
+                    delay
                 }
-            }
+            };
+            tokio::time::sleep(tokio::time::Duration::from_secs(delay)).await;
         }
     }
 }
