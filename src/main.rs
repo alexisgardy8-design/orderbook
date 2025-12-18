@@ -142,7 +142,18 @@ fn main() {
                         println!("👂 Starting Listener for button clicks (Press Ctrl+C to stop)...");
                         let is_running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
                         let position_manager = std::sync::Arc::new(tokio::sync::Mutex::new(position_manager::PositionManager::new(1000.0, None)));
-                        bot.run_listener(is_running, position_manager).await;
+                        
+                        // Create dummy channel for testing
+                        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(100);
+                        
+                        // Spawn a task to print received commands
+                        tokio::spawn(async move {
+                            while let Some(cmd) = cmd_rx.recv().await {
+                                println!("🧪 Test received command: {:?}", cmd);
+                            }
+                        });
+
+                        bot.run_listener(is_running, position_manager, cmd_tx).await;
 
                     } else {
                         eprintln!("❌ Telegram Bot not configured. Check .env file.");

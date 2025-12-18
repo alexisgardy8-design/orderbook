@@ -12,6 +12,8 @@ use tokio::time::{sleep, Duration};
 use crate::position_manager::PositionState;
 use crate::hyperliquid_trade::HyperliquidTrader;
 use crate::hyperliquid_historical::HyperliquidHistoricalData;
+use tokio::sync::mpsc;
+use crate::telegram::TradingCommand;
 
 const HYPERLIQUID_WS_URL: &str = "wss://api.hyperliquid.xyz/ws";
 const COIN: &str = "SOL";
@@ -64,6 +66,7 @@ pub struct HyperliquidFeed {
     telegram: Option<crate::telegram::TelegramBot>,
     is_running: Arc<AtomicBool>,
     last_processed_candle_t: u64,
+    cmd_rx: Option<Arc<Mutex<mpsc::Receiver<TradingCommand>>>>,
 }
 
 impl HyperliquidFeed {
@@ -85,7 +88,8 @@ impl HyperliquidFeed {
         is_live: bool, 
         is_running: Arc<AtomicBool>,
         position_manager: Arc<Mutex<crate::position_manager::PositionManager>>,
-        telegram: Option<crate::telegram::TelegramBot>
+        telegram: Option<crate::telegram::TelegramBot>,
+        cmd_rx: Option<Arc<Mutex<mpsc::Receiver<TradingCommand>>>>
     ) -> Self {
         use crate::adaptive_strategy::AdaptiveConfig;
         
@@ -133,6 +137,7 @@ impl HyperliquidFeed {
             telegram,
             is_running,
             last_processed_candle_t: 0,
+            cmd_rx,
         }
     }
 
@@ -327,6 +332,40 @@ impl HyperliquidFeed {
         }
     }
 
+    /// Handle manual trading commands from Telegram
+    async fn handle_manual_command(&mut self, cmd: TradingCommand) {
+        println!("🕹️ Manual Command Received: {:?}", cmd);
+        
+        let current_price = self.candle_buffer.back().map(|c| c.c).unwrap_or(0.0);
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        use crate::adaptive_strategy::{Signal, PositionType};
+
+        match cmd {
+            TradingCommand::Buy => {
+                println!("🟢 Manual BUY command executing...");
+                self.handle_trading_signal(Signal::BuyTrend, current_price, current_time).await;
+            },
+            TradingCommand::Sell => {
+                println!("🔴 Manual SELL command executing...");
+                self.handle_trading_signal(Signal::SellShort, current_price, current_time).await;
+            },
+            TradingCommand::Close => {
+                println!("❌ Manual CLOSE command executing...");
+                let pos_type = self.strategy.get_position_type();
+                match pos_type {
+                    PositionType::LongRange => self.handle_trading_signal(Signal::SellRange, current_price, current_time).await,
+                    PositionType::LongTrend => self.handle_trading_signal(Signal::SellTrend, current_price, current_time).await,
+                    PositionType::ShortTrend => self.handle_trading_signal(Signal::CoverShort, current_price, current_time).await,
+                    PositionType::None => println!("⚠️ No position to close."),
+                }
+            }
+        }
+    }
+
     /// Session WebSocket unique (extrait de connect_and_trade)
     async fn run_websocket_session(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let (ws_stream, _) = connect_async(HYPERLIQUID_WS_URL).await?;
@@ -367,8 +406,22 @@ impl HyperliquidFeed {
         let mut check_interval = tokio::time::interval(Duration::from_secs(10));
         let mut last_checked_hour = 0u64;
 
+        let cmd_rx_arc = self.cmd_rx.clone();
+
         loop {
             tokio::select! {
+                cmd = async {
+                    if let Some(arc) = &cmd_rx_arc {
+                        let mut rx = arc.lock().await;
+                        rx.recv().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                    if let Some(command) = cmd {
+                        self.handle_manual_command(command).await;
+                    }
+                }
                 _ = check_interval.tick() => {
                     // Vérifier si on a changé d'heure
                     let now = std::time::SystemTime::now()
@@ -1392,16 +1445,21 @@ pub async fn run_live_trading() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Start Telegram Listener ONCE
+    // Create Command Channel
+    let (cmd_tx, cmd_rx) = mpsc::channel(100);
+    let cmd_rx = Arc::new(Mutex::new(cmd_rx));
+
     if let Some(bot) = telegram.clone() {
         let pm = position_manager.clone();
         let ir = is_running.clone();
+        let tx = cmd_tx.clone();
         println!("📱 Starting Telegram Listener (Background Task)...");
         
         // Send Startup Message
         let _ = bot.send_default_message_with_menu_btn("🟢 *Bot Connected* - System Online").await;
 
         tokio::spawn(async move {
-            bot.run_listener(ir, pm).await;
+            bot.run_listener(ir, pm, tx).await;
         });
     }
 
@@ -1418,7 +1476,8 @@ pub async fn run_live_trading() -> Result<(), Box<dyn std::error::Error>> {
             is_live, 
             is_running.clone(),
             position_manager.clone(),
-            telegram.clone()
+            telegram.clone(),
+            Some(cmd_rx.clone())
         );
 
         // Warmup strategy

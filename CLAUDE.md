@@ -13,7 +13,8 @@
   - **Position Management avec Risk Management (1% SL, Levier 5x, 100% Exposure)**
   - **Real-time P&L tracking avec estimation des frais (Net PnL)**
   - **Notifications Telegram en temps réel (Trade Open/Close, PnL)** 📱
-  - **Contrôle du Bot via Telegram (Start/Stop/Status)** 🎮
+  - **Contrôle du Bot via Telegram (Start/Stop/Status/Buy/Sell/Close)** 🎮
+  - **NOUVEAU: Panneau de Trading Manuel (Boutons Interactifs)** 🕹️
   - **NOUVEAU: Persistance des données via Supabase (Logs & Positions)** 🗄️
   - **NOUVEAU: Gestion robuste des arrêts (Graceful Shutdown)** 🛑
   - **NOUVEAU: Intégration CI/CD avec GitHub Actions** 🔄
@@ -1185,9 +1186,10 @@ cargo flamegraph --features websocket -- live
 
 2. **État du code:**
    - Compilable et fonctionnel
-   - **Telegram**: Module `telegram.rs` opérationnel avec menu interactif (Start/Stop/Status/Positions)
+   - **Telegram**: Module `telegram.rs` opérationnel avec menu interactif (Start/Stop/Status/Positions) et **Commandes Manuelles (Buy/Sell/Close)**
    - **Supabase**: Module `supabase.rs` opérationnel pour logs et positions (Tables `bot_logs` et `positions`)
    - **Shared State**: Architecture `Arc<Mutex<PositionManager>>` pour partager l'état entre le trading et le bot Telegram
+   - **Command Channel**: Utilisation de `mpsc::channel` pour envoyer des commandes manuelles du listener Telegram vers la boucle de trading
    - **Graceful Shutdown**: Gestion des signaux système (Ctrl+C) pour fermer proprement les positions et notifier Telegram
    - **Real-time PnL**: Récupération des fills et fundings réels via API Hyperliquid pour reporting précis
    - **Warmup**: Récupération automatique de 100h de données historiques au démarrage

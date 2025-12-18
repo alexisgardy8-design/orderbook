@@ -3,8 +3,15 @@ use serde_json::json;
 use std::env;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 use crate::position_manager::PositionManager;
+
+#[derive(Debug, Clone)]
+pub enum TradingCommand {
+    Buy,
+    Sell,
+    Close,
+}
 
 #[derive(Clone)]
 pub struct TelegramBot {
@@ -64,7 +71,11 @@ impl TelegramBot {
             "inline_keyboard": [[
                 action_btn
             ], [
-                { "text": "💰 Positions & Indicators", "callback_data": "positions" },
+                { "text": "� Buy / Long", "callback_data": "buy" },
+                { "text": "🔴 Sell / Short", "callback_data": "sell" },
+                { "text": "❌ Close Position", "callback_data": "close" }
+            ], [
+                { "text": "�💰 Positions & Indicators", "callback_data": "positions" },
                 { "text": "📜 Last Logs", "callback_data": "logs" }
             ]]
         });
@@ -94,7 +105,11 @@ impl TelegramBot {
             "inline_keyboard": [[
                 action_btn
             ], [
-                { "text": "💰 Positions & Indicators", "callback_data": "positions" },
+                { "text": "� Buy / Long", "callback_data": "buy" },
+                { "text": "🔴 Sell / Short", "callback_data": "sell" },
+                { "text": "❌ Close Position", "callback_data": "close" }
+            ], [
+                { "text": "�💰 Positions & Indicators", "callback_data": "positions" },
                 { "text": "📜 Last Logs", "callback_data": "logs" }
             ]]
         });
@@ -150,7 +165,7 @@ impl TelegramBot {
         Ok(())
     }
 
-    pub async fn run_listener(self, is_running: Arc<AtomicBool>, position_manager: Arc<Mutex<PositionManager>>) {
+    pub async fn run_listener(self, is_running: Arc<AtomicBool>, position_manager: Arc<Mutex<PositionManager>>, cmd_tx: mpsc::Sender<TradingCommand>) {
         let mut offset = 0;
         println!("📱 Telegram Listener Started...");
 
@@ -275,6 +290,18 @@ impl TelegramBot {
                                                 let _ = self.send_control_keyboard(running).await;
                                             }
                                             reply_text = "Menu Opened";
+                                        },
+                                        "buy" => {
+                                            let _ = cmd_tx.send(TradingCommand::Buy).await;
+                                            reply_text = "🟢 Buy Order Sent";
+                                        },
+                                        "sell" => {
+                                            let _ = cmd_tx.send(TradingCommand::Sell).await;
+                                            reply_text = "🔴 Sell Order Sent";
+                                        },
+                                        "close" => {
+                                            let _ = cmd_tx.send(TradingCommand::Close).await;
+                                            reply_text = "❌ Close Order Sent";
                                         },
                                         _ => {}
                                     }
