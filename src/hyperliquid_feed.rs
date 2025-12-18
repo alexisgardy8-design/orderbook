@@ -336,13 +336,51 @@ impl HyperliquidFeed {
     async fn handle_manual_command(&mut self, cmd: TradingCommand) {
         println!("🕹️ Manual Command Received: {:?}", cmd);
         
-        let current_price = self.candle_buffer.back().map(|c| c.c).unwrap_or(0.0);
+        // 1. Fetch Real-Time Price (Critical for Manual Orders)
+        let mut current_price = self.candle_buffer.back().map(|c| c.c).unwrap_or(0.0);
+        if let Some(trader) = &self.trader {
+            match trader.get_mark_price(&self.coin).await {
+                Ok(price) => {
+                    println!("✅ Real-time Mark Price fetched: ${:.2}", price);
+                    current_price = price;
+                },
+                Err(e) => eprintln!("⚠️ Failed to fetch real-time price: {}. Using last candle close.", e),
+            }
+        }
+
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
 
         use crate::adaptive_strategy::{Signal, PositionType};
+
+        // 2. Sync Strategy State with PositionManager (Critical for Close logic)
+        {
+            let pm = self.position_manager.lock().await;
+            if let Some(pos) = &pm.position {
+                // If PM has a position but Strategy doesn't, force update strategy state
+                if self.strategy.get_position_type() == PositionType::None {
+                    println!("🔄 Syncing Strategy State with PositionManager...");
+                    match pos.state {
+                        crate::position_manager::PositionState::Long => {
+                            // Assume Trend for manual sync if unknown
+                            self.strategy.force_position_type(PositionType::LongTrend); 
+                        },
+                        crate::position_manager::PositionState::Short => {
+                            self.strategy.force_position_type(PositionType::ShortTrend);
+                        },
+                        _ => {}
+                    }
+                }
+            } else {
+                // If PM has no position, ensure Strategy is None
+                if self.strategy.get_position_type() != PositionType::None {
+                    println!("🔄 Syncing Strategy State (Reset to None)...");
+                    self.strategy.force_position_type(PositionType::None);
+                }
+            }
+        }
 
         match cmd {
             TradingCommand::Buy => {
@@ -360,7 +398,7 @@ impl HyperliquidFeed {
                     PositionType::LongRange => self.handle_trading_signal(Signal::SellRange, current_price, current_time).await,
                     PositionType::LongTrend => self.handle_trading_signal(Signal::SellTrend, current_price, current_time).await,
                     PositionType::ShortTrend => self.handle_trading_signal(Signal::CoverShort, current_price, current_time).await,
-                    PositionType::None => println!("⚠️ No position to close."),
+                    PositionType::None => println!("⚠️ No position to close (Strategy State is None)."),
                 }
             }
         }
@@ -767,6 +805,14 @@ impl HyperliquidFeed {
                     
                     if let Some(mut position) = pm.open_long(current_price, current_time, stop_loss_price) {
                         
+                        // Round size for SOL (2 decimals)
+                        let rounded_size = (position.position_size * 100.0).trunc() / 100.0;
+                        position.position_size = rounded_size;
+                        position.position_value = rounded_size * position.entry_price;
+                        
+                        // Update PM with rounded size
+                        pm.position = Some(position.clone());
+
                         println!("\n💰 TRADE EXECUTION:");
                         println!("   Action:     🟢 BUY (LONG)");
                         println!("   Entry:      ${:.2}", position.entry_price);
@@ -917,11 +963,14 @@ impl HyperliquidFeed {
                             let mut final_pnl = closed_pos.profit_loss;
                             let mut final_net_pnl = closed_pos.profit_loss;
                             let mut is_real_data = false;
+                            
+                            // Ensure size is rounded
+                            let exec_size = (closed_pos.position_size * 100.0).trunc() / 100.0;
 
                             if is_live {
                                 if let Some(trader) = trader {
                                     println!("🚀 EXECUTING LIVE ORDER...");
-                                    match trader.place_market_order_with_retry(&coin, false, closed_pos.position_size, current_price, 0.05, 10).await.map_err(|e| e.to_string()) {
+                                    match trader.place_market_order_with_retry(&coin, false, exec_size, current_price, 0.05, 10).await.map_err(|e| e.to_string()) {
                                         Ok(oid) => {
                                             println!("✅ LIVE ORDER PLACED: OID {}", oid);
                                             println!("⏳ Waiting for fill details...");
@@ -1026,6 +1075,14 @@ impl HyperliquidFeed {
                     
                     if let Some(mut position) = pm.open_short(current_price, current_time, stop_loss_price) {
                         
+                        // Round size for SOL (2 decimals)
+                        let rounded_size = (position.position_size * 100.0).trunc() / 100.0;
+                        position.position_size = rounded_size;
+                        position.position_value = rounded_size * position.entry_price;
+                        
+                        // Update PM with rounded size
+                        pm.position = Some(position.clone());
+
                         println!("\n💰 TRADE EXECUTION:");
                         println!("   Action:     📉 SHORT");
                         println!("   Entry:      ${:.2}", position.entry_price);
@@ -1051,8 +1108,8 @@ impl HyperliquidFeed {
                             if is_live {
                                 if let Some(trader) = trader {
                                     println!("🚀 EXECUTING LIVE ORDER...");
-                                    // Use Market Order (Limit with 5% slippage)
-                                    match trader.place_market_order(&coin, false, position_size, entry_price, 0.05).await.map_err(|e| e.to_string()) {
+                                    // Use Market Order with Retry (Standardized)
+                                    match trader.place_market_order_with_retry(&coin, false, position_size, entry_price, 0.05, 3).await.map_err(|e| e.to_string()) {
                                         Ok(oid) => {
                                             println!("✅ LIVE ORDER PLACED: OID {}", oid);
                                             println!("⏳ Waiting for fill details...");
@@ -1176,12 +1233,15 @@ impl HyperliquidFeed {
                             let mut final_pnl = closed_pos.profit_loss;
                             let mut final_net_pnl = closed_pos.profit_loss;
                             let mut is_real_data = false;
+                            
+                            // Ensure size is rounded
+                            let exec_size = (closed_pos.position_size * 100.0).trunc() / 100.0;
 
                             if is_live {
                                 if let Some(trader) = trader {
                                     println!("🚀 EXECUTING LIVE ORDER...");
-                                    // Use Market Order to close position
-                                    match trader.place_market_order(&coin, true, closed_pos.position_size, current_price, 0.05).await.map_err(|e| e.to_string()) {
+                                    // Use Market Order with Retry (Standardized)
+                                    match trader.place_market_order_with_retry(&coin, true, exec_size, current_price, 0.05, 10).await.map_err(|e| e.to_string()) {
                                         Ok(oid) => {
                                             println!("✅ LIVE ORDER PLACED: OID {}", oid);
                                             println!("⏳ Waiting for fill details...");

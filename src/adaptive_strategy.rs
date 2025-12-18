@@ -613,6 +613,11 @@ impl AdaptiveStrategy {
     pub fn get_rsi_value(&self) -> f64 {
         self.last_rsi
     }
+
+    /// Force set the position type (Used for Manual Sync)
+    pub fn force_position_type(&mut self, pos_type: PositionType) {
+        self.position_type = pos_type;
+    }
 }
 
 #[cfg(test)]

@@ -366,6 +366,46 @@ impl HyperliquidTrader {
         Err(format!("Asset {} not found", coin).into())
     }
 
+    /// Fetch current mark price for an asset
+    pub async fn get_mark_price(&self, coin: &str) -> Result<f64, Box<dyn std::error::Error>> {
+        let client = reqwest::Client::new();
+        let response = client
+            .post("https://api.hyperliquid.xyz/info")
+            .json(&json!({"type": "metaAndAssetCtxs"}))
+            .send()
+            .await?
+            .json::<serde_json::Value>()
+            .await?;
+
+        // response is [meta, assetCtxs]
+        if let Some(arr) = response.as_array() {
+            if arr.len() >= 2 {
+                let universe = arr[0]["universe"].as_array().ok_or("Missing universe")?;
+                let asset_ctxs = arr[1].as_array().ok_or("Missing assetCtxs")?;
+
+                // Find asset index
+                let mut asset_idx = None;
+                for (i, asset) in universe.iter().enumerate() {
+                    if asset["name"].as_str() == Some(coin) {
+                        asset_idx = Some(i);
+                        break;
+                    }
+                }
+
+                if let Some(idx) = asset_idx {
+                    if let Some(ctx) = asset_ctxs.get(idx) {
+                        if let Some(mark_px_str) = ctx["markPx"].as_str() {
+                            let mark_px = mark_px_str.parse::<f64>()?;
+                            return Ok(mark_px);
+                        }
+                    }
+                }
+            }
+        }
+        
+        Err(format!("Failed to fetch mark price for {}", coin).into())
+    }
+
     /// Sign an action using MsgPack + Keccak256 + ECDSA
     #[cfg(feature = "websocket")]
     fn sign_action(&self, action: Action, nonce: u64) -> Result<Signature, Box<dyn std::error::Error>> {

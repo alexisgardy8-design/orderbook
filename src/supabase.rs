@@ -15,15 +15,20 @@ pub struct DbLog {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DbPosition {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<i64>, // Supabase ID
     pub coin: String,
     pub side: String, // "LONG" or "SHORT"
     pub entry_price: f64,
     pub size: f64,
     pub status: String, // "OPEN", "CLOSED"
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub closed_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_price: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pnl: Option<f64>,
 }
 
@@ -60,13 +65,20 @@ impl SupabaseClient {
             created_at: Some(adjusted_time),
         };
 
-        self.client.post(&url)
+        let response = self.client.post(&url)
             .header("apikey", &self.key)
             .header("Authorization", format!("Bearer {}", self.key))
             .header("Content-Type", "application/json")
             .json(&log_entry)
             .send()
             .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await?;
+            eprintln!("Failed to log to Supabase ({}): {}", status, text);
+            // We don't return error here to avoid breaking the main loop just because logging failed
+        }
 
         Ok(())
     }
@@ -123,6 +135,12 @@ impl SupabaseClient {
             .send()
             .await?;
 
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await?;
+            return Err(format!("Supabase error ({}): {}", status, text).into());
+        }
+
         let created: Vec<DbPosition> = response.json().await?;
         if let Some(p) = created.first() {
             Ok(p.id.unwrap_or(0))
@@ -134,13 +152,19 @@ impl SupabaseClient {
     pub async fn update_position(&self, id: i64, update: &DbPosition) -> Result<(), Box<dyn Error>> {
         let url = format!("{}/rest/v1/positions?id=eq.{}", self.url, id);
         
-        self.client.patch(&url)
+        let response = self.client.patch(&url)
             .header("apikey", &self.key)
             .header("Authorization", format!("Bearer {}", self.key))
             .header("Content-Type", "application/json")
             .json(update)
             .send()
             .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await?;
+            return Err(format!("Supabase update error ({}): {}", status, text).into());
+        }
 
         Ok(())
     }

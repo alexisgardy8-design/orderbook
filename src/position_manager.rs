@@ -355,10 +355,10 @@ impl PositionManager {
         let stop_loss_pct = ((entry_price - stop_loss_price) / entry_price) * 100.0;
         let mut position_value = self.bankroll.calculate_position_size(stop_loss_pct);
 
-        // 1. Minimum Order Value ($10)
-        if position_value < 10.0 {
-            println!("⚠️ Position calculée (${:.2}) < $10. Ajustement à $10.", position_value);
-            position_value = 10.0;
+        // 1. Minimum Order Value ($12 to be safe with rounding)
+        if position_value < 12.0 {
+            println!("⚠️ Position calculée (${:.2}) < $12. Ajustement à $12.", position_value);
+            position_value = 12.0;
         }
 
         // 2. Vérification du solde disponible (Marge)
@@ -398,10 +398,10 @@ impl PositionManager {
         let stop_loss_pct = ((stop_loss_price - entry_price) / entry_price) * 100.0;
         let mut position_value = self.bankroll.calculate_position_size(stop_loss_pct);
 
-        // 1. Minimum Order Value ($10)
-        if position_value < 10.0 {
-            println!("⚠️ Position calculée (${:.2}) < $10. Ajustement à $10.", position_value);
-            position_value = 10.0;
+        // 1. Minimum Order Value ($12 to be safe with rounding)
+        if position_value < 12.0 {
+            println!("⚠️ Position calculée (${:.2}) < $12. Ajustement à $12.", position_value);
+            position_value = 12.0;
         }
 
         // 2. Vérification du solde disponible (Marge)
