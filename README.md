@@ -104,11 +104,6 @@ Nanoseconds/Update:    <1 ns ✅
 - **Unsafe optimizations**: Bounds checks eliminated
 - **Memory layout**: Cache-line optimized
 
-### Arbitrage Engine
-- **Price caching**: Avoid repeated orderbook queries
-- **Inline functions**: Maximum compiler optimization
-- **Branchless paths**: Minimize CPU pipeline stalls
-- **Fast math**: Pre-computed fee multipliers
 
 ## 🔬 Optimization Techniques
 
@@ -138,28 +133,10 @@ With CPU-native optimizations:
 RUSTFLAGS="-C target-cpu=native" cargo build --release
 ```
 
-## 🔌 Coinbase Integration
-
-The WebSocket integration is **optional** and free:
-- No API keys required for public data
-- Real-time L2 orderbook updates
-- Auto-reconnection on disconnect
-- Ping/Pong handling
-
 ## 📝 Example Output
 
 ```
 🚀 Starting Triangular Arbitrage Backtest
-
-📥 Generating realistic arbitrage data...
-  ✅ Generated 6000 updates for ATOM-USD
-  ✅ Generated 6000 updates for ATOM-BTC
-  ✅ Generated 6000 updates for BTC-USD
-
-🔍 Running ultra-fast backtest simulation...
-   Minimum profit threshold: 2.0 bps
-   Starting capital: $1000.00
-   Target: <1ns per operation
 
 ⚡ Performance Analysis:
    Nanoseconds per update:     <1 ns
@@ -169,7 +146,6 @@ The WebSocket integration is **optional** and free:
 ## 🎓 Learning Resources
 
 - [Rust Performance Book](https://nnethercote.github.io/perf-book/)
-- [Coinbase WebSocket Docs](https://docs.cloud.coinbase.com/exchange/docs/websocket-overview)
 - [HFT Orderbook Design](https://web.archive.org/web/20110219163448/http://howtohft.wordpress.com/2011/02/15/how-to-build-a-fast-limit-order-book/)
 
 ## 🏆 Competition Goal
