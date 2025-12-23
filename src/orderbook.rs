@@ -15,15 +15,6 @@ impl OrderBookImpl {
     /// # Arguments
     /// * `min_price` - Minimum price (in i64 with 4 decimals, e.g., 1000000 for $100)
     /// * `max_price` - Maximum price (in i64 with 4 decimals)
-    /// 
-    /// # Examples
-    /// ```
-    /// // For BTC-USD ($80k to $120k):
-    /// let ob = OrderBookImpl::with_range(800_000_000, 1_200_000_000);
-    /// 
-    /// // For ATOM-USD ($5 to $20):
-    /// let ob = OrderBookImpl::with_range(50_000, 200_000);
-    /// ```
     pub fn with_range(min_price: i64, max_price: i64) -> Self {
         let levels = (max_price - min_price) as usize;
         Self {
